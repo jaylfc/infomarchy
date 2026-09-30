@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { orcaSwitchArgv, switchToOrcaTerminal, validOrcaHandle } from "./orca-focus";
+import { orcaSwitchArgv, resolveOrcaBinary, switchToOrcaTerminal, validOrcaHandle } from "./orca-focus";
 import { sessionHostsFromEnvironment } from "./collector";
 
 const environ = (pairs: Record<string, string>) => Object.entries(pairs).map(([k, v]) => `${k}=${v}`).join("\0") + "\0";
@@ -19,6 +19,14 @@ describe("Orca terminal handles", () => {
       .toEqual(["orca", "terminal", "switch", "--terminal", "term_68dcb0de-301f-4633-9458-dcb5bad5978e"]);
     expect(orcaSwitchArgv("; rm -rf /")).toEqual([]);
     expect(orcaSwitchArgv("")).toEqual([]);
+  });
+
+  test("the binary is resolved, not assumed to be on PATH", () => {
+    // The desk inherits the compositor's PATH. Orca installs as an AppImage
+    // symlinked into ~/bin, which a login shell has and a service may not.
+    const resolved = resolveOrcaBinary();
+    expect(resolved.length).toBeGreaterThan(0);
+    expect(resolveOrcaBinary("/nonexistent-home")).toBeTruthy();
   });
 
   test("a rejected handle never spawns anything", async () => {

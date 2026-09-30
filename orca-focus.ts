@@ -22,6 +22,18 @@ export function validOrcaHandle(value: unknown): string {
   return HANDLE.test(handle) ? handle : "";
 }
 
+// The desk inherits the compositor's PATH, not a login shell's. Orca installs
+// as an AppImage symlinked into ~/bin, which is on PATH on this desk but is
+// not guaranteed anywhere else, so resolve it rather than hoping.
+export function resolveOrcaBinary(home = process.env.HOME || ""): string {
+  const found = typeof Bun !== "undefined" ? Bun.which("orca") : "";
+  if (found) return found;
+  for (const candidate of [home ? home + "/bin/orca" : "", "/usr/local/bin/orca", "/usr/bin/orca"]) {
+    try { if (candidate && Bun.file(candidate).size >= 0) return candidate; } catch {}
+  }
+  return "orca";
+}
+
 export function orcaSwitchArgv(handle: unknown, binary = "orca"): string[] {
   const id = validOrcaHandle(handle);
   // The handle is a FLAG, not a positional: `orca terminal switch <id>`
@@ -33,7 +45,7 @@ export function orcaSwitchArgv(handle: unknown, binary = "orca"): string[] {
 // Resolves true only when the CLI exits 0. A handle for a tab Orca has since
 // closed exits non-zero, and the caller treats that as "no jump" rather than
 // pretending the click worked.
-export async function switchToOrcaTerminal(handle: unknown, timeoutMs = ORCA_TIMEOUT_MS, binary = "orca"): Promise<boolean> {
+export async function switchToOrcaTerminal(handle: unknown, timeoutMs = ORCA_TIMEOUT_MS, binary = resolveOrcaBinary()): Promise<boolean> {
   const argv = orcaSwitchArgv(handle, binary);
   if (!argv.length) return false;
   try {
