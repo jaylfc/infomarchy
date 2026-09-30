@@ -111,6 +111,9 @@ describe("usage trend chart", () => {
     expect(view).toContain("readonly property var usageSeries");
     expect(view).toContain("id: trendCanvas");
     expect(view).toContain('text: view.usageMetric === "value" ? "≈ $ VALUE" : "TOKENS"');
+    expect(view).toContain("up.u.usageStatusText");
+    expect(view).toContain("color: Util.alpha(up.tone, 0.07)");
+    expect(view).toContain("border.color: Util.alpha(up.tone, 0.28)");
     expect(view).toContain("usageTrend.hovered");
     expect(view).toContain('"% cache reads"');
     expect(view).toContain('"unpriced"');
@@ -1156,5 +1159,60 @@ describe("optional development apps", () => {
     expect(enabled({})("apps")).toBe(false);
     expect(enabled({ apps: true })("apps")).toBe(true);
     expect(enabled({})("sessions")).toBe(true);
+  });
+});
+
+describe("hard refresh", () => {
+  test("HARD REFRESH is the first module-strip control and forces a collector pass", () => {
+    const strip = view.slice(view.indexOf("id: moduleStrip"), view.indexOf("id: leftColumn"));
+    expect(strip.indexOf("HARD REFRESH")).toBeGreaterThan(-1);
+    expect(strip.indexOf("HARD REFRESH")).toBeLessThan(strip.indexOf("Repeater {"));
+    expect(view).toContain("onClicked: view.desk.hardRefresh()");
+    expect(model).toContain("function hardRefresh()");
+    expect(service).toContain("function hardRefresh(): void { infoModel.hardRefresh() }");
+    expect(overlay).toContain("function hardRefresh() { infoModel.hardRefresh() }");
+  });
+
+  test("a hard refresh does nothing while the model is inactive, the same as refresh", () => {
+    const body = model.slice(model.indexOf("function hardRefresh()"));
+    const guard = body.indexOf("if (!root.active) return");
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(body.indexOf("root.forceRefreshArmed = true"));
+  });
+});
+
+describe("collector command", () => {
+  // The command is a declarative binding, so no start path can drop --demo.
+  const body = model.match(/\n    command: \{\n([\s\S]*?)\n    \}\n/)?.[1] || "";
+  const build = (props: Record<string, unknown>) =>
+    Function("root", body)({ collectorPath: "/p/collector.ts", instance: "bg", demoMode: false, forceRefreshArmed: false, ...props });
+
+  test("is a binding and is never assigned imperatively", () => {
+    expect(body).toContain("root.demoMode");
+    expect(model).not.toMatch(/collector\.command\s*=/);
+    expect(model).not.toContain("function collectorCommand");
+  });
+
+  test("demo mode always carries --demo, even when a hard refresh is armed", () => {
+    expect(build({ demoMode: true })).toEqual(["bun", "/p/collector.ts", "--id", "bg", "--demo"]);
+    const armed = build({ demoMode: true, forceRefreshArmed: true });
+    expect(armed).toContain("--demo");
+    expect(armed).not.toContain("--force-refresh");
+  });
+
+  test("a hard refresh adds --force-refresh outside demo mode", () => {
+    expect(build({})).toEqual(["bun", "/p/collector.ts", "--id", "bg"]);
+    expect(build({ forceRefreshArmed: true })).toContain("--force-refresh");
+  });
+
+  test("--usage-visible follows the USAGE card and never rides along in demo mode", () => {
+    expect(model).toContain("property bool usageVisible: false");
+    expect(build({ usageVisible: true })).toContain("--usage-visible");
+    expect(build({ usageVisible: false })).not.toContain("--usage-visible");
+    expect(build({ demoMode: true, usageVisible: true })).not.toContain("--usage-visible");
+    const bound = 'dashboardSettings.ready && dashboardSettings.dashboardVisible && dashboardSettings.sectionEnabled("usage")';
+    expect(service).toContain("usageVisible: " + bound);
+    // A closed overlay shows no card, so it never counts as visible.
+    expect(overlay).toContain("usageVisible: root.opened && " + bound);
   });
 });

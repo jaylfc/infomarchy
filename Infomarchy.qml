@@ -65,6 +65,7 @@ Scope {
     refreshMs: dashboardSettings.dashboardVisible ? 4000 : 16000
     demoMode: root.demoMode
     ollamaHost: dashboardSettings.ollamaHost
+    usageVisible: dashboardSettings.ready && dashboardSettings.dashboardVisible && dashboardSettings.sectionEnabled("usage")
     active: dashboardSettings.ready && (dashboardSettings.dashboardVisible || dashboardSettings.notificationsEnabled)
   }
   InfoSettings { id: dashboardSettings }
@@ -230,6 +231,7 @@ Scope {
   IpcHandler {
     target: "infomarchy"
     function refresh(): void { infoModel.refresh() }
+    function hardRefresh(): void { infoModel.hardRefresh() }
     function setWallpaperOpacity(v: string): void { var n = Number(v); if (isFinite(n)) root.wallpaperOpacity = Math.max(0, Math.min(1, n)) }
     function setDashboardVisible(v: string): void { dashboardSettings.setDashboardVisible(["1", "true", "on", "yes"].indexOf(String(v).toLowerCase()) >= 0) }
     function toggleDashboard(): void { dashboardSettings.toggleDashboardVisible() }

@@ -1,9 +1,10 @@
+import { parseGrokCreditsConfig, grokBillingFromUnifiedLog, grokObservedLimits, grokBillingRefreshDue, GROK_BILLING_REFRESH_MS, GROK_BILLING_FORCE_FLOOR_MS, forceRefreshRequested, grokBillingAllowed, claudeRefreshAllowed, usageCardVisible, claudeRefreshDue, withGrokObservedLimits, refreshGrokBilling, claudeOauthExpiredAt } from "./collector.ts";
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "fs";
 import { Database } from "bun:sqlite";
 import { tmpdir } from "os";
 import { join, relative } from "path";
-import { providerOf, titleLooksBusy, cmdIsTurnInhibitor, sessionIdFrom, sessionHostsFromEnvironment, tmuxSocketFromEnvironment, parseTmuxPanes, parseTmuxClients, tmuxPaneForAncestors, linkRecentToLive, inferSessionIdsFromRecent, attachSessionTopics, localSessionSummary, cleanGeneratedSummary, activityCellIndex, parseExternalIpTrace, externalIpCacheFresh, frameSnapshot, parseJsonBounded, readRegularFileLimited, safePrompt, sessionPresentation, writePrivateStateFile, decodeProjectDir, dropPartialFirstLine, readHistoryTail, readRegularFileHead, rolloutSessionId, rolloutCwd, topicCacheHit, topicRetryBlocked, pruneTopicCache, reapStateTempFiles, parseGpuLine, parseDfRows, plausibleTimestamp, normalizeUsage, normalizeUsageLimit, ollamaHostIsLocal, topicRefinementAllowed, terminate, rateForModel, estimateValue, valueSummary, alignDailyTokens, localDayKey, loadPricing, todayValueEstimate, herdrSocketFromEnvironment, herdrClientPids, herdrWindowFor, boomuxClientShellId, boomuxWindowFor, backgroundDaemonKind, parseClaudeAgents, sessionStaleness, opencodeUsageFromRows, STALE_AFTER_MS, decodeBase32, grokBotLine, grokBotRow, grokBotAttention, attachGrokBotRoster, grokSessionUsage, usageModelBreakdown, windowMatchesProvider, hermesSessionByPid, validNetDevice, observationalGitCommand, observationalGitEnv, piUserText, piSessionIdFromName, cursorProjectPath, cursorUserText, cursorTimestamp, cursorTranscriptBusy, cursorIsWorker, cursorWorkspaceDir, cursorCurrentChat, sessionBusyState } from "./collector.ts";
+import { providerOf, titleLooksBusy, cmdIsTurnInhibitor, sessionIdFrom, sessionHostsFromEnvironment, tmuxSocketFromEnvironment, parseTmuxPanes, parseTmuxClients, tmuxPaneForAncestors, linkRecentToLive, inferSessionIdsFromRecent, attachSessionTopics, localSessionSummary, cleanGeneratedSummary, activityCellIndex, parseExternalIpTrace, externalIpCacheFresh, frameSnapshot, parseJsonBounded, readRegularFileLimited, safePrompt, sessionPresentation, writePrivateStateFile, decodeProjectDir, dropPartialFirstLine, readHistoryTail, readRegularFileHead, rolloutSessionId, rolloutCwd, topicCacheHit, topicRetryBlocked, pruneTopicCache, reapStateTempFiles, parseGpuLine, parseDfRows, plausibleTimestamp, normalizeUsage, normalizeUsageLimit, ollamaHostIsLocal, topicRefinementAllowed, terminate, rateForModel, estimateValue, valueSummary, alignDailyTokens, localDayKey, loadPricing, todayValueEstimate, herdrSocketFromEnvironment, herdrClientPids, herdrWindowFor, boomuxClientShellId, boomuxWindowFor, backgroundDaemonKind, parseClaudeAgents, sessionStaleness, opencodeUsageFromRows, STALE_AFTER_MS, decodeBase32, grokBotLine, grokBotRow, grokBotAttention, attachGrokBotRoster, grokSessionUsage, usageModelBreakdown, windowMatchesProvider, hermesSessionByPid, validNetDevice, observationalGitCommand, observationalGitEnv, piUserText, piSessionIdFromName, grokTurnFromUpdate, foldGrokTurnsChunk, emptyGrokFileEntry, newestGrokFiles, grokEntryFromPrev, grokUsageFilesForPrev, cursorProjectPath, cursorUserText, cursorTimestamp, cursorTranscriptBusy, cursorIsWorker, cursorWorkspaceDir, cursorCurrentChat, sessionBusyState } from "./collector.ts";
 import { sessionEventId } from "./notification-events.ts";
 
 const testRoot = mkdtempSync(join(tmpdir(), "infomarchy-test-"));
@@ -724,6 +725,357 @@ describe("history collection", () => {
       project: "~/Work",
       text: "inspect with password: [redacted]",
     });
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+// Synthetic turn_completed lines with the key set of a real Grok CLI 1.0.24
+// updates.jsonl record. No field holds prompt or tool text.
+type GrokTurnModel = { input: number; cached: number; output: number; reasoning?: number };
+function grokTurnLine(sid: string, pid: string, ms: number, m: Record<string, GrokTurnModel>, stop = "end_turn"): string {
+  const models = Object.fromEntries(Object.entries(m).map(([k, v]) => [k, {
+    inputTokens: v.input, outputTokens: v.output, totalTokens: v.input + v.output, cachedReadTokens: v.cached,
+    cacheCreationTokens: 0, reasoningTokens: v.reasoning ?? 0, modelCalls: 1, apiDurationMs: 900, costUsdTicks: 1000,
+  }]));
+  const sum = (f: string) => Object.values(models).reduce((s: number, x: any) => s + x[f], 0);
+  return JSON.stringify({ timestamp: Math.floor(ms / 1000), method: "_x.ai/session/update", params: {
+    sessionId: sid,
+    update: { sessionUpdate: "turn_completed", prompt_id: pid, stop_reason: stop, usage: {
+      inputTokens: sum("inputTokens"), outputTokens: sum("outputTokens"), totalTokens: sum("totalTokens"),
+      cachedReadTokens: sum("cachedReadTokens"), cacheCreationTokens: 0, reasoningTokens: sum("reasoningTokens"),
+      modelCalls: 1, apiDurationMs: 900, costUsdTicks: 1000, modelUsage: models, numTurns: 1,
+    }, elapsed_ms: 1000 },
+    _meta: { eventId: "e-" + pid, agentTimestampMs: ms },
+  } });
+}
+const GROK_SID = "01a0aaaa-0000-7000-8000-000000000001";
+
+describe("Grok per-turn usage", () => {
+  const stamp = Date.UTC(2026, 8, 10, 12);
+  const at = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+  const days = [at(6, 0), at(7, 0), at(8, 0)].map(localDayKey);
+  const fold = (entry: any, text: string, seen = new Set<string>(), sid = GROK_SID) =>
+    foldGrokTurnsChunk(entry, Buffer.from(text), sid, seen, days, stamp);
+  const dayTotal = (entry: any, day: string) => Object.values(entry.days[day] || {}).reduce((s: number, x: any) => s + x, 0);
+
+  test("each turn is summed once, and values that fall between turns still add up", () => {
+    const turns = [
+      { input: 108_120, cached: 100_000, output: 1_000 },
+      { input: 131_853, cached: 120_000, output: 2_000 },
+      { input: 94_103, cached: 90_000, output: 500 },
+    ];
+    const entry = emptyGrokFileEntry();
+    const text = turns.map((t, i) => grokTurnLine(GROK_SID, "p-" + i, at(7, 10 + i), { "grok-4.6-build": t })).join("\n") + "\n";
+    expect(fold(entry, text)).toBe(Buffer.byteLength(text));
+    expect(entry.turns).toBe(3);
+    expect(dayTotal(entry, days[1])).toBe(9_120 + 13_853 + 4_603);
+    expect(entry.lifetime["grok-4.6-build"]).toEqual({ inputTokens: 24_076, outputTokens: 3_500, cacheReadInputTokens: 310_000, cacheCreationInputTokens: 0 });
+  });
+
+  test("a turn goes into the local day it completed", () => {
+    const entry = emptyGrokFileEntry();
+    fold(entry, [
+      grokTurnLine(GROK_SID, "p-1", at(6, 23, 50), { m: { input: 1_000, cached: 0, output: 10 } }),
+      grokTurnLine(GROK_SID, "p-2", at(7, 0, 10), { m: { input: 2_000, cached: 0, output: 20 } }),
+    ].join("\n") + "\n");
+    expect(entry.days[days[0]]).toEqual({ m: 1_010 });
+    expect(entry.days[days[1]]).toEqual({ m: 2_020 });
+  });
+
+  test("a prompt_id is counted once, in one chunk, across chunks and across files", () => {
+    const line = grokTurnLine(GROK_SID, "p-dup", at(7, 9), { m: { input: 500, cached: 0, output: 5 } }) + "\n";
+    const seen = new Set<string>();
+    const entry = emptyGrokFileEntry();
+    fold(entry, line + line, seen);
+    fold(entry, line, seen);
+    expect(entry.turns).toBe(1);
+    expect(dayTotal(entry, days[1])).toBe(505);
+    // A copy in another session file, as a fork might write it.
+    const other = emptyGrokFileEntry();
+    fold(other, grokTurnLine("01a0bbbb-0000-7000-8000-000000000002", "p-dup", at(7, 9), { m: { input: 500, cached: 0, output: 5 } }) + "\n", seen, "01a0bbbb-0000-7000-8000-000000000002");
+    expect(other.turns).toBe(0);
+    // The ids persist, so a later pass rebuilds the same set.
+    expect(entry.ids).toHaveLength(1);
+  });
+
+  test("only a well-formed turn_completed record of this session counts", () => {
+    const usage = { inputTokens: 9_000, outputTokens: 900, cachedReadTokens: 0, cacheCreationTokens: 0, totalTokens: 9_900 };
+    const base = { timestamp: Math.floor(at(7, 11) / 1000), method: "_x.ai/session/update" };
+    const lines = [
+      // Tool output quoting a turn record: the quoted copy is escaped.
+      JSON.stringify({ ...base, params: { sessionId: GROK_SID, update: { sessionUpdate: "tool_call_update", content: [{ text: grokTurnLine(GROK_SID, "p-quoted", at(7, 11), { m: { input: 9_000, cached: 0, output: 900 } }) }] } } }),
+      // Usage-shaped fields beside the exact needle bytes, in a record that is not a turn.
+      JSON.stringify({ ...base, params: { sessionId: GROK_SID, update: { sessionUpdate: "tool_call_update", prompt_id: "p-nested", usage, rawOutput: { sessionUpdate: "turn_completed" } } } }),
+      JSON.stringify({ ...base, params: { sessionId: GROK_SID, update: { sessionUpdate: "turn_completed", prompt_id: "p-no-usage", stop_reason: "end_turn" } } }),
+      JSON.stringify({ ...base, method: "session/update", params: { sessionId: GROK_SID, update: { sessionUpdate: "turn_completed", prompt_id: "p-method", usage } } }),
+      grokTurnLine("01a0cccc-0000-7000-8000-000000000003", "p-other-session", at(7, 11), { m: { input: 9_000, cached: 0, output: 900 } }),
+      grokTurnLine(GROK_SID, "p-future", stamp + 3_600_000, { m: { input: 9_000, cached: 0, output: 900 } }),
+      grokTurnLine(GROK_SID, "p-long", at(7, 11), { m: { input: 9_000, cached: 0, output: 900 } }).replace('"method"', `"pad":"${"x".repeat(17_000)}","method"`),
+      grokTurnLine(GROK_SID, "p-cancelled", at(7, 12), { m: { input: 3_000, cached: 1_000, output: 30 } }, "cancelled"),
+    ];
+    const entry = emptyGrokFileEntry();
+    fold(entry, lines.join("\n") + "\n");
+    expect(entry.turns).toBe(1);
+    expect(entry.days[days[1]]).toEqual({ m: 2_030 });
+    const nested = JSON.parse(lines[1]);
+    expect(grokTurnFromUpdate(nested, GROK_SID, stamp)).toBeNull();
+    expect(grokTurnFromUpdate(JSON.parse(lines[7]), "", stamp)).toBeNull();
+  });
+
+  test("burn leaves cache reads out and keeps them in lifetime", () => {
+    const turn = grokTurnFromUpdate(JSON.parse(grokTurnLine(GROK_SID, "p-1", at(7, 8), {
+      "grok-4.6-build": { input: 2_557_090, cached: 2_549_376, output: 2_322, reasoning: 1_701 },
+    })), GROK_SID, stamp);
+    expect(turn?.models["grok-4.6-build"]).toEqual({ inputTokens: 7_714, outputTokens: 2_322, cacheReadInputTokens: 2_549_376, cacheCreationInputTokens: 0 });
+    const entry = emptyGrokFileEntry();
+    fold(entry, grokTurnLine(GROK_SID, "p-1", at(7, 8), { "grok-4.6-build": { input: 2_557_090, cached: 2_549_376, output: 2_322, reasoning: 1_701 } }) + "\n");
+    expect(dayTotal(entry, days[1])).toBe(10_036);
+    const clamped = grokTurnFromUpdate(JSON.parse(grokTurnLine(GROK_SID, "p-2", at(7, 8), { m: { input: 100, cached: 400, output: 7 } })), GROK_SID, stamp);
+    expect(clamped?.models.m.inputTokens).toBe(0);
+  });
+
+  test("two models in one turn each get their share, and a turn without modelUsage is filed under grok", () => {
+    const entry = emptyGrokFileEntry();
+    const line = grokTurnLine(GROK_SID, "p-1", at(7, 8), { a: { input: 1_000, cached: 400, output: 10 }, b: { input: 300, cached: 0, output: 3 } });
+    const bare = JSON.parse(grokTurnLine(GROK_SID, "p-2", at(7, 9), { x: { input: 50, cached: 0, output: 5 } }));
+    delete bare.params.update.usage.modelUsage;
+    fold(entry, line + "\n" + JSON.stringify(bare) + "\n");
+    expect(entry.days[days[1]]).toEqual({ a: 610, b: 303, grok: 55 });
+    expect(dayTotal(entry, days[1])).toBe(968);
+  });
+
+  test("a partial last line is left for the next read", () => {
+    const first = grokTurnLine(GROK_SID, "p-1", at(7, 8), { m: { input: 100, cached: 0, output: 1 } }) + "\n";
+    const second = grokTurnLine(GROK_SID, "p-2", at(7, 9), { m: { input: 200, cached: 0, output: 2 } });
+    const entry = emptyGrokFileEntry();
+    const seen = new Set<string>();
+    expect(fold(entry, first + second.slice(0, 40), seen)).toBe(Buffer.byteLength(first));
+    expect(entry.turns).toBe(1);
+    expect(fold(entry, second + "\n", seen)).toBe(Buffer.byteLength(second) + 1);
+    expect(dayTotal(entry, days[1])).toBe(303);
+  });
+
+  test("a line longer than the chunk is dropped without stalling the reader", () => {
+    const first = grokTurnLine(GROK_SID, "p-1", at(7, 8), { m: { input: 100, cached: 0, output: 1 } }) + "\n";
+    const last = grokTurnLine(GROK_SID, "p-2", at(7, 9), { m: { input: 200, cached: 0, output: 2 } }) + "\n";
+    const file = Buffer.from(first + JSON.stringify({ pad: "y".repeat(2 * 1024 * 1024) }) + "\n" + last);
+    const entry = emptyGrokFileEntry();
+    const seen = new Set<string>();
+    let skipped = false, reads = 0;
+    while (entry.offset < file.length && reads++ < 16) {
+      const consumed = foldGrokTurnsChunk(entry, file.subarray(entry.offset, entry.offset + 1024 * 1024), GROK_SID, seen, days, stamp);
+      skipped ||= entry.skip;
+      entry.offset += consumed;
+      if (!consumed) break;
+    }
+    expect(entry.offset).toBe(file.length);
+    expect(skipped).toBe(true);
+    expect(entry.skip).toBe(false);
+    expect(entry.turns).toBe(2);
+  });
+
+  test("the newest sessions are kept past the cap, by mtime", () => {
+    const files = Array.from({ length: 300 }, (_, i) => ({ path: "s" + i, mtimeMs: i === 0 ? 9e12 : i }));
+    const kept = newestGrokFiles(files, 256);
+    expect(kept).toHaveLength(256);
+    expect(kept[0].path).toBe("s0");
+    expect(kept.map(f => f.path)).not.toContain("s1");
+  });
+
+  test("the prev entries stay inside the prev file's parse budget, newest first", () => {
+    const dayKeys = Array.from({ length: 7 }, (_, i) => `2026-09-0${i + 1}`);
+    const models = Array.from({ length: 17 }, (_, i) => "model-" + i);
+    const entries: Array<[string, any]> = Array.from({ length: 256 }, (_, i) => {
+      const entry = emptyGrokFileEntry(1000 + i);
+      entry.offset = 5_000_000; entry.turns = 512;
+      entry.ids = Array.from({ length: 512 }, (_, j) => (i * 1000 + j).toString(36));
+      for (const m of models) entry.lifetime[m] = { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 1, cacheCreationInputTokens: 0 };
+      for (const d of [...dayKeys, "2025-01-01"]) entry.days[d] = Object.fromEntries(models.map(m => [m, 1]));
+      return ["/grok/sessions/g/session-" + i + "/updates.jsonl", entry];
+    });
+    const out = grokUsageFilesForPrev(entries, dayKeys);
+    expect(out.v).toBe("grok-usage-v3");
+    const text = JSON.stringify({ grokUsageFiles: out, topicSummaries: {}, sessionNotifications: [] });
+    expect(text.length).toBeLessThan(2 * 1024 * 1024);
+    expect(parseJsonBounded(text)).not.toBeNull();
+    const first = out.files[entries[0][0]];
+    expect(first.days["2025-01-01"]).toBeUndefined();
+    expect(grokEntryFromPrev(first)?.ids).toHaveLength(512);
+    // Anything out of shape is dropped, and the file is read again from the start.
+    expect(grokEntryFromPrev({ ...first, offset: -1 })).toBeNull();
+    expect(grokEntryFromPrev({ ...first, ids: "A,b" })).toBeNull();
+    expect(grokEntryFromPrev({ ...first, days: { "2026-09-01": { m: "5" } } })).toBeNull();
+    expect(grokEntryFromPrev({ ...first, lifetime: { m: { inputTokens: 1 } } })).toBeNull();
+  });
+});
+
+describe("Grok per-turn usage in a real collector run", () => {
+  const dayStart = () => new Date(Date.now()).setUTCHours(0, 0, 0, 0);
+  const todayAt = (i: number) => Math.min(dayStart() + i * 1000, Date.now());
+  async function run(root: string): Promise<any> {
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "collector.ts")], {
+      env: { TZ: "UTC", HOME: root, USER: "tester", GROK_HOME: join(root, ".grok"), XDG_STATE_HOME: join(root, "state"), PATH: process.env.PATH || "", INFOMARCHY_SKIP_EXTERNAL_IP: "1", INFOMARCHY_SKIP_GITHUB: "1", INFOMARCHY_SKIP_CONTAINERS: "1" },
+      stdout: "pipe", stderr: "pipe",
+    });
+    const snap = decodeFrames(await new Response(proc.stdout).text());
+    expect(await proc.exited).toBe(0);
+    return snap;
+  }
+  const prevOf = (root: string) => JSON.parse(readFileSync(join(root, "state", "infomarchy", "prev-bg.json"), "utf8"));
+  function session(root: string, sid = GROK_SID): string {
+    const dir = join(root, ".grok", "sessions", "proj", sid);
+    mkdirSync(dir, { recursive: true });
+    return join(dir, "updates.jsonl");
+  }
+
+  test("turns with falling values become the local row, today and lifetime", async () => {
+    const root = join(testRoot, "grok-turns");
+    const path = session(root);
+    const turns = [
+      { input: 108_120, cached: 100_000, output: 1_000 },
+      { input: 131_853, cached: 120_000, output: 2_000 },
+      { input: 94_103, cached: 90_000, output: 500 },
+    ];
+    writeFileSync(path, turns.map((t, i) => grokTurnLine(GROK_SID, "p-" + i, todayAt(i + 1), { "grok-4.6-build": t })).join("\n") + "\n");
+    const grok = (await run(root)).ai.usage.grok;
+    expect(grok.tierLabel).toBe("local");
+    expect(grok.todayTotalTokens).toBe(27_576);
+    expect(grok.models[0]).toMatchObject({ id: "grok-4.6-build", todayTokens: 27_576 });
+    expect(grok.modelUsage["grok-4.6-build"]).toMatchObject({ inputTokens: 24_076, outputTokens: 3_500, cacheReadInputTokens: 310_000 });
+    expect(grok.totalSessions).toBe(1);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a session with no turn usage keeps the session-count row", async () => {
+    const root = join(testRoot, "grok-no-usage");
+    writeFileSync(session(root), JSON.stringify({ timestamp: Math.floor(todayAt(1) / 1000), method: "_x.ai/session/update", params: {
+      sessionId: GROK_SID, update: { sessionUpdate: "turn_completed", prompt_id: "p-1", stop_reason: "end_turn" } } }) + "\n");
+    const grok = (await run(root)).ai.usage.grok;
+    expect(grok.hasTokenData).toBe(false);
+    expect(grok.tierLabel).not.toBe("local");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("only new bytes are read, and a line still being written is read once whole", async () => {
+    const root = join(testRoot, "grok-incremental");
+    const path = session(root);
+    const line = (i: number) => grokTurnLine(GROK_SID, "p-" + i, todayAt(i), { m: { input: 1_000 * i, cached: 0, output: i } });
+    writeFileSync(path, line(1) + "\n" + line(2) + "\n");
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(3_003);
+    const offset = () => prevOf(root).grokUsageFiles.files[path].offset;
+    expect(offset()).toBe(lstatSync(path).size);
+    appendFileSync(path, line(3) + "\n");
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(6_006);
+    expect(offset()).toBe(lstatSync(path).size);
+    const fourth = line(4);
+    appendFileSync(path, fourth.slice(0, 50));
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(6_006);
+    expect(offset()).toBe(lstatSync(path).size - 50);
+    appendFileSync(path, fourth.slice(50) + "\n");
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(10_010);
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(10_010);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a replaced or truncated session file is counted again from its new content", async () => {
+    const root = join(testRoot, "grok-replaced");
+    const path = session(root);
+    const line = (id: string, input: number) => grokTurnLine(GROK_SID, id, todayAt(5), { m: { input, cached: 0, output: 0 } });
+    writeFileSync(path, line("p-1", 1_000) + "\n" + line("p-2", 2_000) + "\n");
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(3_000);
+    // A new inode, longer than what was read before.
+    writeFileSync(path + ".new", [line("p-3", 10), line("p-4", 20), line("p-5", 30), line("p-6", 40)].join("\n") + "\n");
+    renameSync(path + ".new", path);
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(100);
+    // The same inode, cut shorter in place.
+    writeFileSync(path, line("p-7", 7) + "\n");
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(7);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a turn copied into another session file is counted once, in the same pass or a later one", async () => {
+    const root = join(testRoot, "grok-copied");
+    const child = "01a0abab-0000-7000-8000-000000000005";
+    const line = (sid: string) => grokTurnLine(sid, "p-shared", todayAt(1), { m: { input: 800, cached: 0, output: 8 } });
+    writeFileSync(session(root), line(GROK_SID) + "\n");
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(808);
+    writeFileSync(session(root, child), line(child) + "\n" + grokTurnLine(child, "p-own", todayAt(2), { m: { input: 90, cached: 0, output: 0 } }) + "\n");
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(898);
+    rmSync(join(root, "state"), { recursive: true, force: true });
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(898);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a pass reads a bounded amount, newest session first, and catches up later", async () => {
+    const root = join(testRoot, "grok-budget");
+    const older = session(root, "01a0dddd-0000-7000-8000-000000000004");
+    const newer = session(root);
+    const pad = JSON.stringify({ pad: "z".repeat(8 * 1024) }) + "\n";
+    writeFileSync(older, pad.repeat(2_112) + grokTurnLine("01a0dddd-0000-7000-8000-000000000004", "p-old", todayAt(1), { m: { input: 700, cached: 0, output: 0 } }) + "\n");
+    writeFileSync(newer, grokTurnLine(GROK_SID, "p-new", todayAt(2), { m: { input: 50, cached: 0, output: 0 } }) + "\n");
+    const past = new Date(Date.now() - 3_600_000);
+    utimesSync(older, past, past);
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(50);
+    let total = 0;
+    for (let i = 0; i < 4 && total !== 750; i++) total = (await run(root)).ai.usage.grok.todayTotalTokens;
+    expect(total).toBe(750);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("today's session is counted when more than 256 older sessions exist", async () => {
+    const root = join(testRoot, "grok-many");
+    const past = new Date(Date.now() - 86_400_000);
+    const old = (i: number) => {
+      const path = session(root, `01a0eeee-0000-7000-8000-${String(i).padStart(12, "0")}`);
+      writeFileSync(path, "");
+      utimesSync(path, past, past);
+    };
+    // Created in the middle, today's session is past the 256th entry whether
+    // the filesystem lists oldest first (btrfs) or newest first (tmpfs).
+    for (let i = 0; i < 300; i++) old(i);
+    writeFileSync(session(root, "01a0ffff-0000-7000-8000-000000000000"), grokTurnLine("01a0ffff-0000-7000-8000-000000000000", "p-1", todayAt(1), { m: { input: 42, cached: 0, output: 0 } }) + "\n");
+    for (let i = 300; i < 600; i++) old(i);
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(42);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a record cached by an earlier version is not reused", async () => {
+    const root = join(testRoot, "grok-salt");
+    const path = session(root);
+    const state = join(root, "state", "infomarchy");
+    mkdirSync(state, { recursive: true, mode: 0o700 });
+    writeFileSync(path, grokTurnLine(GROK_SID, "p-1", todayAt(1), { "grok-4.6-build": { input: 2_557_090, cached: 2_549_376, output: 2_322, reasoning: 1_701 } }) + "\n");
+    const file = lstatSync(path);
+    const today = new Date().toISOString().slice(0, 10);
+    writeFileSync(join(state, "prev-bg.json"), JSON.stringify({
+      grokLocalUsage: { identity: "1", record: { name: "Grok", ready: true, todayTotalTokens: 5_108_824, limits: [] } },
+      grokUsageFiles: { v: "grok-usage-v2", files: { [path]: { ino: file.ino, offset: file.size, skip: false, turns: 1, ids: "", lifetime: {}, days: { [today]: { m: 5_108_824 } } } } },
+    }));
+    expect((await run(root)).ai.usage.grok.todayTotalTokens).toBe(10_036);
+    const written = prevOf(root);
+    expect(written.grokLocalUsage).toBeUndefined();
+    expect(written.grokUsageFiles.v).toBe("grok-usage-v3");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a file already read is not read again, and its earlier day stays in the daily series", async () => {
+    const root = join(testRoot, "grok-cached-day");
+    const path = session(root);
+    const state = join(root, "state", "infomarchy");
+    mkdirSync(state, { recursive: true, mode: 0o700 });
+    // The file holds a turn from today, but the entry says it was read to the end.
+    writeFileSync(path, grokTurnLine(GROK_SID, "p-1", todayAt(1), { m: { input: 999, cached: 0, output: 0 } }) + "\n");
+    const file = lstatSync(path);
+    const yesterday = new Date(dayStart() - 3_600_000).toISOString().slice(0, 10);
+    writeFileSync(join(state, "prev-bg.json"), JSON.stringify({ grokUsageFiles: { v: "grok-usage-v3", files: { [path]: {
+      ino: file.ino, offset: file.size, skip: false, turns: 1, ids: "abc",
+      lifetime: { m: { inputTokens: 500, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+      days: { [yesterday]: { m: 500 } },
+    } } } }));
+    const snap = await run(root);
+    const grok = snap.ai.usage.grok;
+    expect(grok.todayTotalTokens).toBe(0);
+    expect(grok.dailyTokens[snap.ai.usageDays.indexOf(yesterday)]).toBe(500);
     rmSync(root, { recursive: true, force: true });
   });
 });
@@ -1674,6 +2026,74 @@ describe("Cursor", () => {
   });
 });
 
+describe("outbound usage gate in a real collector run", () => {
+  // A stand-in `claude` records each invocation. It is first on a PATH that
+  // holds no real claude, so nothing here can reach an account.
+  const root = join(testRoot, "usage-gate");
+  const home = join(root, "home");
+  const marker = join(root, "claude-calls");
+  const fakeBin = join(root, "bin");
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  mkdirSync(join(home, ".grok"), { recursive: true });
+  mkdirSync(fakeBin, { recursive: true });
+  // On a print-mode call it also copies the throttle file, which shows what was
+  // on disk at the moment the CLI started.
+  const seen = join(root, "claude-auth-refresh.seen");
+  const throttle = join(home, "state", "infomarchy", "claude-auth-refresh.json");
+  writeFileSync(join(fakeBin, "claude"), `#!/bin/sh\necho "$*" >> ${JSON.stringify(marker)}\nif [ "$1" = "-p" ]; then cp ${JSON.stringify(throttle)} ${JSON.stringify(seen)}; fi\n`);
+  chmodSync(join(fakeBin, "claude"), 0o755);
+  writeFileSync(join(home, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { expiresAt: 1000 } }), { mode: 0o600 });
+  writeFileSync(join(home, ".grok", "auth.json"), JSON.stringify({ a: { key: "x".repeat(40), expires_at: "2999-01-01T00:00:00Z" } }), { mode: 0o600 });
+  const collect = async (args: string[], env: Record<string, string>) => {
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "collector.ts"), ...args], {
+      env: { HOME: home, USER: "tester", XDG_STATE_HOME: join(home, "state"), OMARCHY_PATH: join(root, "no-omarchy"), PATH: `${fakeBin}:/usr/bin:/bin`,
+        INFOMARCHY_SKIP_EXTERNAL_IP: "1", INFOMARCHY_SKIP_GITHUB: "1", INFOMARCHY_SKIP_CONTAINERS: "1", ...env },
+      stdout: "pipe", stderr: "pipe",
+    });
+    await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+  };
+  // The collector also runs the local `claude agents --json` listing; only
+  // print-mode calls reach the model.
+  const calls = () => existsSync(marker) ? readFileSync(marker, "utf8").trim().split("\n").filter(line => line.startsWith("-p ")) : [];
+
+  test("opted in but with the USAGE card hidden, nothing runs", async () => {
+    await collect(["--id", "bg"], { INFOMARCHY_ALLOW_CLAUDE_REFRESH: "1", INFOMARCHY_ALLOW_GROK_BILLING: "1" });
+    expect(calls()).toEqual([]);
+    expect(existsSync(join(home, "state", "infomarchy", "grok-billing.json"))).toBe(false);
+  });
+
+  test("visible but not opted in, nothing runs", async () => {
+    await collect(["--id", "bg", "--usage-visible"], {});
+    expect(calls()).toEqual([]);
+  });
+
+  test("opted in and visible, an expired token gets one refresh", async () => {
+    await collect(["--id", "bg", "--usage-visible"], { INFOMARCHY_ALLOW_CLAUDE_REFRESH: "1" });
+    expect(calls()).toEqual(["-p ping --max-turns 0 --output-format json"]);
+    // The attempt is recorded in the shared state file before the CLI runs.
+    expect(JSON.parse(readFileSync(seen, "utf8")).attemptedAt).toBeGreaterThan(0);
+  });
+
+  test("HARD REFRESH does not bypass the 15-minute limit, from either instance", async () => {
+    const env = { INFOMARCHY_ALLOW_CLAUDE_REFRESH: "1" };
+    await collect(["--id", "bg", "--usage-visible", "--force-refresh"], env);
+    await collect(["--id", "bg", "--usage-visible", "--force-refresh"], env);
+    await collect(["--id", "overlay", "--usage-visible", "--force-refresh"], env);
+    expect(calls()).toHaveLength(1);
+  });
+
+  test("a throttle file that cannot be written means no refresh", async () => {
+    // A directory where the attempt record goes makes the write fail, and the
+    // refresh fails closed rather than running without a clock.
+    const state = join(root, "unwritable-state");
+    mkdirSync(join(state, "infomarchy", "claude-auth-refresh.json"), { recursive: true, mode: 0o700 });
+    const before = calls().length;
+    await collect(["--id", "bg", "--usage-visible"], { INFOMARCHY_ALLOW_CLAUDE_REFRESH: "1", XDG_STATE_HOME: state });
+    expect(calls()).toHaveLength(before);
+  });
+});
+
 describe("container snapshot", () => {
   test("demo data includes a containers card payload without host paths", async () => {
     const home = join(testRoot, "demo-home");
@@ -1689,5 +2109,230 @@ describe("container snapshot", () => {
     expect(snap.containers).toMatchObject({ present: true, engine: "docker", up: 3, total: 4 });
     expect(snap.containers.items.map((item: any) => item.label)).toEqual(["search", "proxy", "db", "worker"]);
     expect(JSON.stringify(snap.containers)).not.toContain("/home/");
+  });
+});
+
+describe("usage opt-ins and Grok billing", () => {
+  test("Grok credits config uses 0-100 percents and product rows", () => {
+    const parsed = parseGrokCreditsConfig({
+      config: {
+        creditUsagePercent: 17,
+        currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: "2026-09-14T07:26:13Z" },
+        productUsage: [{ product: "GrokBuild", usagePercent: 14 }, { product: "GrokVoice", usagePercent: 3 }],
+      },
+    });
+    expect(parsed).toEqual({
+      percent: 0.17,
+      resetsAt: "2026-09-14T07:26:13Z",
+      products: [{ label: "BUILD", percent: 0.14 }, { label: "VOICE", percent: 0.03 }],
+    });
+    const log = grokBillingFromUnifiedLog(JSON.stringify({
+      msg: "billing: fetched credits config",
+      ctx: { config: { creditUsagePercent: 16, currentPeriod: { end: "2026-09-14T07:26:13Z" }, productUsage: [] } },
+    }) + "\n");
+    expect(log?.percent).toBe(0.16);
+    const dir = join(testRoot, "grok-billing");
+    mkdirSync(dir, { recursive: true });
+    const reset = new Date(Date.now() + 86_400_000).toISOString();
+    writeFileSync(join(dir, "grok-billing.json"), JSON.stringify({
+      limits: [{ label: "WEEKLY", percent: 0.17, resetsAt: reset }, { label: "BUILD", percent: 0.14, resetsAt: reset }],
+    }));
+    expect(grokObservedLimits(dir, true).map((row: any) => row.label)).toEqual(["WEEKLY", "BUILD"]);
+    expect(grokObservedLimits(dir, true)[0].percent).toBe(0.17);
+  });
+
+  test("Grok billing refresh is due after 60s, or after 10s on force", () => {
+    const stamp = 1_000_000;
+    const fresh = { attemptedAt: stamp - GROK_BILLING_REFRESH_MS + 1, limits: [{ label: "WEEKLY", percent: 0.02 }] };
+    expect(grokBillingRefreshDue(fresh, stamp)).toBe(false);
+    expect(grokBillingRefreshDue(fresh, stamp, true)).toBe(true);
+    // Force skips the cache, not the floor: a click right after an attempt waits.
+    expect(grokBillingRefreshDue({ attemptedAt: stamp - GROK_BILLING_FORCE_FLOOR_MS + 1 }, stamp, true)).toBe(false);
+    expect(grokBillingRefreshDue({ attemptedAt: stamp - GROK_BILLING_FORCE_FLOOR_MS }, stamp, true)).toBe(true);
+    expect(grokBillingRefreshDue({ attemptedAt: stamp - GROK_BILLING_REFRESH_MS, limits: [{ label: "WEEKLY", percent: 0.02 }] }, stamp)).toBe(true);
+    expect(grokBillingRefreshDue({ attemptedAt: stamp, limits: [] }, stamp)).toBe(false);
+    expect(grokBillingRefreshDue({}, stamp)).toBe(true);
+    expect(forceRefreshRequested(["bun", "collector.ts"])).toBe(false);
+    expect(forceRefreshRequested(["bun", "collector.ts", "--force-refresh"])).toBe(true);
+    // Only the argument forces. An inherited environment would force every tick.
+    const previous = process.env.INFOMARCHY_FORCE_REFRESH;
+    process.env.INFOMARCHY_FORCE_REFRESH = "1";
+    try {
+      expect(forceRefreshRequested(["bun", "collector.ts"])).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.INFOMARCHY_FORCE_REFRESH;
+      else process.env.INFOMARCHY_FORCE_REFRESH = previous;
+    }
+  });
+
+  test("outbound usage calls are off unless explicitly allowed and the USAGE card is visible", () => {
+    const shown = ["bun", "collector.ts", "--id", "bg", "--usage-visible"];
+    const hidden = ["bun", "collector.ts", "--id", "bg"];
+    expect(usageCardVisible(shown)).toBe(true);
+    expect(usageCardVisible(hidden)).toBe(false);
+    expect(grokBillingAllowed({}, shown)).toBe(false);
+    expect(grokBillingAllowed({ INFOMARCHY_ALLOW_GROK_BILLING: "0" }, shown)).toBe(false);
+    expect(grokBillingAllowed({ INFOMARCHY_ALLOW_GROK_BILLING: "true" }, shown)).toBe(false);
+    expect(grokBillingAllowed({ INFOMARCHY_ALLOW_GROK_BILLING: "1" }, shown)).toBe(true);
+    expect(grokBillingAllowed({ INFOMARCHY_ALLOW_GROK_BILLING: "1" }, hidden)).toBe(false);
+    // The old skip switch never enables anything.
+    expect(grokBillingAllowed({ INFOMARCHY_SKIP_GROK_BILLING: "0" }, shown)).toBe(false);
+    expect(claudeRefreshAllowed({}, shown)).toBe(false);
+    expect(claudeRefreshAllowed({ INFOMARCHY_ALLOW_CLAUDE_REFRESH: "0" }, shown)).toBe(false);
+    expect(claudeRefreshAllowed({ INFOMARCHY_ALLOW_CLAUDE_REFRESH: "1" }, shown)).toBe(true);
+    expect(claudeRefreshAllowed({ INFOMARCHY_ALLOW_CLAUDE_REFRESH: "1" }, hidden)).toBe(false);
+    expect(claudeRefreshAllowed({ INFOMARCHY_SKIP_CLAUDE_USAGE: "0" }, shown)).toBe(false);
+  });
+
+  test("the Claude CLI refresh is due only when expired, from the wallpaper, once per 15 minutes", () => {
+    const minute = 60_000, stamp = 100 * minute;
+    expect(claudeRefreshDue(0, stamp, true, "bg")).toBe(true);
+    expect(claudeRefreshDue(0, stamp, false, "bg")).toBe(false);
+    expect(claudeRefreshDue(0, stamp, true, "overlay")).toBe(false);
+    expect(claudeRefreshDue(stamp - 14 * minute, stamp, true, "bg")).toBe(false);
+    expect(claudeRefreshDue(stamp - 15 * minute, stamp, true, "bg")).toBe(true);
+    // A clock that moved backwards keeps the limit rather than lifting it.
+    expect(claudeRefreshDue(stamp + minute, stamp, true, "bg")).toBe(false);
+  });
+
+  test("Claude auth help follows status and OAuth expiry is explicit", () => {
+    expect(normalizeUsage({authHelpText: "Run claude auth login", limits: [{label:"Weekly", percent:0.2}]}).authHelpText).toBe("");
+    expect(normalizeUsage({usageStatusText: "expired", authHelpText: "Sign in"}).authHelpText).toBe("Sign in");
+    expect(claudeOauthExpiredAt(1000, 1001)).toBe(true);
+    expect(claudeOauthExpiredAt(2000, 1001)).toBe(false);
+  });
+});
+
+describe("Grok billing without token snapshots", () => {
+  test("attaches observed limits to session-only usage without inventing tokens", () => {
+    const dir = join(testRoot, "grok-session-billing");
+    mkdirSync(dir, { recursive: true });
+    const sessions = normalizeUsage({ name: "Grok", totalSessions: 3, todaySessions: 1, modelSessions: { grok: 3 }, limits: [] });
+    expect(withGrokObservedLimits(sessions, dir, true).limits).toEqual([]);
+    writeFileSync(join(dir, "grok-billing.json"), JSON.stringify({ limits: [{ label: "WEEKLY", percent: 0.17 }] }));
+    const result = withGrokObservedLimits(sessions, dir, true);
+    expect(result.limits[0].percent).toBe(0.17);
+    expect(result.tierLabel).toBe("weekly");
+    expect(result.hasTokenData).toBe(false);
+    expect(result.todaySessions).toBe(1);
+    expect(result.totalSessions).toBe(3);
+    expect(result.models).toEqual(sessions.models);
+    expect(result.usageStatusText).toContain("session counts");
+    expect(sessions.limits).toEqual([]);
+    // A new billing result must be visible even when the local record is cached.
+    writeFileSync(join(dir, "grok-billing.json"), JSON.stringify({ limits: [{ label: "WEEKLY", percent: 0.28 }] }));
+    expect(withGrokObservedLimits(sessions, dir, true).limits[0].percent).toBe(0.28);
+    const tokens = normalizeUsage({ name: "Grok", todayTotalTokens: 100, limits: [] });
+    expect(withGrokObservedLimits(tokens, dir, true).usageStatusText).toContain("token totals");
+    // With the billing opt-in off, a file left from an earlier opt-in is not shown.
+    expect(grokObservedLimits(dir, false)).toEqual([]);
+    expect(withGrokObservedLimits(sessions, dir, false)).toBe(sessions);
+  });
+
+  test("a billing window that has already reset is not shown", () => {
+    const dir = join(testRoot, "grok-billing-expired");
+    mkdirSync(dir, { recursive: true });
+    const stamp = Date.UTC(2026, 8, 14, 12);
+    writeFileSync(join(dir, "grok-billing.json"), JSON.stringify({
+      limits: [{ label: "WEEKLY", percent: 0.9, resetsAt: new Date(stamp - 3_600_000).toISOString() }],
+    }));
+    expect(grokObservedLimits(dir, true, stamp)).toEqual([]);
+    expect(grokObservedLimits(dir, true, stamp - 7_200_000)[0].percent).toBe(0.9);
+    // Only the rows past their reset go; a row with no reset time stays.
+    writeFileSync(join(dir, "grok-billing.json"), JSON.stringify({
+      limits: [{ label: "WEEKLY", percent: 0.9, resetsAt: new Date(stamp).toISOString() }, { label: "BUILD", percent: 0.2 }],
+    }));
+    expect(grokObservedLimits(dir, true, stamp).map((row: any) => row.label)).toEqual(["BUILD"]);
+  });
+});
+
+describe("Grok billing backoff and mutual exclusion", () => {
+  test("without the opt-in no request is made and no billing state is written", async () => {
+    const directory = join(testRoot, "billing-default-off");
+    let calls = 0;
+    const previous = process.env.INFOMARCHY_ALLOW_GROK_BILLING;
+    delete process.env.INFOMARCHY_ALLOW_GROK_BILLING;
+    try {
+      await refreshGrokBilling({ directory, force: true, readLog: () => "", fetchBilling: async () => { calls++; return { creditUsagePercent: 25 }; } });
+      await refreshGrokBilling({ directory, enabled: false, force: true, readLog: () => "", fetchBilling: async () => { calls++; return { creditUsagePercent: 25 }; } });
+    } finally {
+      if (previous !== undefined) process.env.INFOMARCHY_ALLOW_GROK_BILLING = previous;
+    }
+    expect(calls).toBe(0);
+    expect(existsSync(join(directory, "grok-billing.json"))).toBe(false);
+  });
+
+  test("failed first fetch backs off, expires after 60 seconds, and allows hard refresh", async () => {
+    const directory = join(testRoot, "billing-failure");
+    let calls = 0;
+    const options = { directory, enabled: true, readLog: () => "", fetchBilling: async () => { calls++; return null; } };
+    await refreshGrokBilling({ ...options, stamp: 1_000_000 });
+    await refreshGrokBilling({ ...options, stamp: 1_000_001 });
+    expect(calls).toBe(1);
+    await refreshGrokBilling({ ...options, stamp: 1_060_000 });
+    expect(calls).toBe(2);
+    await refreshGrokBilling({ ...options, stamp: 1_060_001, force: true });
+    expect(calls).toBe(2);
+    await refreshGrokBilling({ ...options, stamp: 1_060_000 + GROK_BILLING_FORCE_FLOOR_MS, force: true });
+    expect(calls).toBe(3);
+  });
+
+  test("overlapping collectors share a lock, including hard refresh, and release after errors", async () => {
+    const directory = join(testRoot, "billing-overlap");
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0;
+    const options = { directory, enabled: true, stamp: 2_000_000, readLog: () => "" };
+    const first = refreshGrokBilling({ ...options, fetchBilling: async () => {
+      calls++;
+      entered();
+      await blocked;
+      throw new Error("simulated interrupted fetch");
+    } });
+    try {
+      await started;
+      expect(JSON.parse(readFileSync(join(directory, "grok-billing.json"), "utf8")).attemptedAt).toBe(options.stamp);
+      // Past the force floor, so only the lock can be what stops this one.
+      await refreshGrokBilling({ ...options, stamp: options.stamp + GROK_BILLING_FORCE_FLOOR_MS, force: true, fetchBilling: async () => { calls++; return null; } });
+      expect(calls).toBe(1);
+    } finally { release(); await first; }
+    await refreshGrokBilling({ ...options, stamp: options.stamp + GROK_BILLING_FORCE_FLOOR_MS, force: true, fetchBilling: async () => { calls++; return { creditUsagePercent: 25 }; } });
+    expect(calls).toBe(2);
+    expect(grokObservedLimits(directory, true)[0].percent).toBe(0.25);
+    // A later outage preserves the successful result while recording backoff.
+    await refreshGrokBilling({ ...options, stamp: 2_070_000, fetchBilling: async () => null });
+    expect(grokObservedLimits(directory, true)[0].percent).toBe(0.25);
+  });
+
+  test("a killed collector releases its lock for the next hard refresh", async () => {
+    const directory = join(testRoot, "billing-killed");
+    const script = `import { refreshGrokBilling } from ${JSON.stringify(join(import.meta.dir, "collector.ts"))};
+      await refreshGrokBilling({ directory: process.argv[1], enabled: true, force: true, readLog: () => "",
+        fetchBilling: async () => { console.log("locked"); await Bun.sleep(60000); return null; } });`;
+    const child = Bun.spawn([process.execPath, "-e", script, directory], { stdout: "pipe", stderr: "ignore" });
+    try {
+      const reader = child.stdout.getReader();
+      const chunk = await reader.read();
+      expect(new TextDecoder().decode(chunk.value).trim()).toBe("locked");
+      reader.releaseLock();
+      child.kill("SIGKILL");
+      await child.exited;
+      let called = false;
+      await refreshGrokBilling({ directory, enabled: true, force: true, stamp: Date.now() + GROK_BILLING_FORCE_FLOOR_MS, readLog: () => "", fetchBilling: async () => { called = true; return null; } });
+      expect(called).toBe(true);
+    } finally { await terminate(child); }
+  });
+
+  test("a planted lock symlink is refused without touching its target", async () => {
+    const directory = join(testRoot, "billing-lock-symlink");
+    mkdirSync(directory, { recursive: true });
+    const target = join(testRoot, "lock-victim");
+    writeFileSync(target, "must survive");
+    symlinkSync(target, join(directory, "grok-billing.lock"));
+    let called = false;
+    await refreshGrokBilling({ directory, enabled: true, force: true, fetchBilling: async () => { called = true; return null; }, readLog: () => "" });
+    expect(called).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe("must survive");
   });
 });

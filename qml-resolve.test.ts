@@ -25,6 +25,7 @@ import { join } from "path";
 // Privacy adds unqualified bindings for the status chip and overlay hotkey.
 // Container additions: one Process exit-status metadata warning, plus
 // dynamic Style properties and unqualified card/delegate accesses.
+// Usage (#16) adds the refresh chip and provider-block bindings.
 const CEILINGS: Record<string, number> = {
   "Apps.qml": 6,
   "BackgroundWallpaper.qml": 0,
@@ -49,7 +50,10 @@ const CEILINGS: Record<string, number> = {
   // unqualified, plus the two layout-positioning warnings the existing status
   // dot already produces, for the session dot beside it. Same false-positive
   // shape as the row above it, counted twice because there are now two rows.
-  "InfoView.qml": 593,
+  // +6 (#16): the HARD REFRESH chip and the tinted provider blocks: dynamic
+  // Style properties and unqualified delegate accesses, the same
+  // false-positive shape counted above.
+  "InfoView.qml": 599,
   "Overlay.qml": 29,
   "WaveWallpaper.qml": 0,
 };

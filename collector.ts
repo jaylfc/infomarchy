@@ -33,6 +33,26 @@ function instanceId(): string {
   const raw = i >= 0 ? String(process.argv[i + 1] || "") : "bg";
   return raw.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32) || "bg";
 }
+export function forceRefreshRequested(argv = process.argv): boolean {
+  return argv.includes("--force-refresh");
+}
+const FORCE_REFRESH = forceRefreshRequested();
+// Set per run by InfoModel only while a desk showing the USAGE card is on
+// screen. It is an argument rather than an environment variable, so an
+// inherited environment cannot claim the card is visible.
+export function usageCardVisible(argv = process.argv): boolean {
+  return argv.includes("--usage-visible");
+}
+// Both outbound usage paths spend a credential against an AI account, so both
+// are off unless the operator asks for them, the same rule as
+// INFOMARCHY_ALLOW_REMOTE_OLLAMA, and even then only while the USAGE card is
+// visible to show the result. Local file reads stay on without either.
+export function grokBillingAllowed(env: Record<string, string | undefined> = process.env, argv = process.argv): boolean {
+  return env.INFOMARCHY_ALLOW_GROK_BILLING === "1" && usageCardVisible(argv);
+}
+export function claudeRefreshAllowed(env: Record<string, string | undefined> = process.env, argv = process.argv): boolean {
+  return env.INFOMARCHY_ALLOW_CLAUDE_REFRESH === "1" && usageCardVisible(argv);
+}
 const PREV_FILE = join(STATE_DIR, `prev-${instanceId()}.json`);
 // Shared by every collector instance: the GitHub rows are the same for the
 // wallpaper and the overlay, and one 7-day store means one set of API calls.
@@ -363,7 +383,7 @@ export function externalIpCacheFresh(cached: any, stamp = Date.now()): boolean {
 async function externalIp() {
   const cached = prev.externalIp || {};
   // Cache failures too, otherwise a disconnected host would retry every tick.
-  if (externalIpCacheFresh(cached, now)) return cached;
+  if (!FORCE_REFRESH && externalIpCacheFresh(cached, now)) return cached;
   if (process.env.INFOMARCHY_SKIP_EXTERNAL_IP === "1") return { address: cached.address || null, checkedAt: now };
   try {
     const response = await fetch("https://1.1.1.1/cdn-cgi/trace", { signal: AbortSignal.timeout(1200) });
@@ -382,11 +402,14 @@ const dt = prev.ts ? (now - prev.ts) / 1000 : 0;
 // costs one small file read. Only the wallpaper collector refreshes and
 // writes — the overlay's collector reads the same file — so two instances
 // never race each other's fetches. INFOMARCHY_SKIP_GITHUB=1 never calls gh.
+// HARD REFRESH from the overlay is the one exception, and the write is an
+// atomic rename, so the later writer wins.
 const GITHUB_WRITER = instanceId() !== "overlay";
 async function githubActivity() {
   const ghAvailable = !!Bun.which("gh");
   const store = parseGithubStoreText(read(GITHUB_FILE));
-  if (GITHUB_WRITER && ghAvailable && githubFetchEnabled() && githubRefreshDue(store, now)) {
+  const githubDue = FORCE_REFRESH || githubRefreshDue(store, now);
+  if ((GITHUB_WRITER || FORCE_REFRESH) && ghAvailable && githubFetchEnabled() && githubDue) {
     await refreshGithubActivity(store, now, run, ghAvailable);
     try { writePrivateStateFile(STATE_DIR, basename(GITHUB_FILE), JSON.stringify(store)); } catch {}
   }
@@ -2736,6 +2759,11 @@ export function normalizeUsage(j: any, stamp = now): any {
   const lifetime = valueSummary(j.modelUsage && typeof j.modelUsage === "object" ? j.modelUsage : {});
   const todayValue = todayValueEstimate(j.todayTokensByModel && typeof j.todayTokensByModel === "object" ? j.todayTokensByModel : {}, j.modelUsage && typeof j.modelUsage === "object" ? j.modelUsage : {});
   const dayKeys = heatDays.map(localDayKey);
+  const usageStatusText = uiString(j.usageStatusText, 160);
+  // Omarchy's collector seeds authHelpText with "Run `claude auth login`…"
+  // even on a successful limits probe. The desk then looks expired until a
+  // CLI poke refreshes the meters. Help is only real when a status is set.
+  const authHelpText = usageStatusText ? uiString(j.authHelpText, 200) : "";
   return {
     name: uiString(j.name, 64), ready: j.ready !== false, tierLabel: uiString(j.tierLabel, 32),
     // A provider that publishes no token counts must not read as one that used
@@ -2746,8 +2774,10 @@ export function normalizeUsage(j: any, stamp = now): any {
     // the QML re-derive it (the copy there had drifted out of test coverage).
     limits: (Array.isArray(j.limits) ? j.limits : []).slice(0, 16).map((limit: any) => normalizeUsageLimit(limit, stamp)).filter(Boolean),
     todayPrompts: count(j.todayPrompts), todaySessions: count(j.todaySessions), todayTotalTokens: count(j.todayTotalTokens),
-    totalPrompts: count(j.totalPrompts), totalSessions: count(j.totalSessions), updatedAt: count(j.updatedAt),
-    modelUsage, recentDays, usageStatusText: uiString(j.usageStatusText, 160),
+    totalPrompts: count(j.totalPrompts), totalSessions: count(j.totalSessions),
+    updatedAt: typeof j.updatedAt === "string" ? uiString(j.updatedAt, 40) : count(j.updatedAt),
+    modelUsage, recentDays, usageStatusText,
+    authHelpText,
     // Seven aligned daily token totals (oldest first) for the trend chart, and
     // API-value estimates from the attributed price table.
     dailyTokens: alignDailyTokens(j.recentDays, dayKeys),
@@ -2759,6 +2789,575 @@ export function normalizeUsage(j: any, stamp = now): any {
     },
   };
 }
+const LOCAL_USAGE_STATUS = "local session totals, not subscription limits";
+const GROK_BILLING_FILE = "grok-billing.json";
+const GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+export const GROK_BILLING_REFRESH_MS = 60 * 1000;
+const GROK_PRODUCT_LABELS: Record<string, string> = {
+  GrokBuild: "BUILD", PRODUCT_GROK_BUILD: "BUILD",
+  GrokVoice: "VOICE", PRODUCT_GROK_VOICE: "VOICE",
+  GrokChat: "CHAT", PRODUCT_GROK_CHAT: "CHAT",
+  GrokImagine: "IMAGINE", PRODUCT_GROK_IMAGINE: "IMAGINE",
+};
+export function parseGrokCreditsConfig(value: any): { percent: number; resetsAt: string; products: { label: string; percent: number }[] } | null {
+  if (!value || typeof value !== "object") return null;
+  const cfg = value.config && typeof value.config === "object" ? value.config : value;
+  const raw = Number(cfg.creditUsagePercent);
+  if (!Number.isFinite(raw) || raw < 0) return null;
+  const percent = Math.max(0, Math.min(1, raw / 100));
+  const period = cfg.currentPeriod && typeof cfg.currentPeriod === "object" ? cfg.currentPeriod : {};
+  const resetsAt = uiString(period.end || cfg.billingPeriodEnd, 40);
+  const products: { label: string; percent: number }[] = [];
+  const rows = Array.isArray(cfg.productUsage) ? cfg.productUsage : [];
+  for (const row of rows.slice(0, 4)) {
+    if (!row || typeof row !== "object") continue;
+    const p = Number(row.usagePercent);
+    if (!Number.isFinite(p) || p < 0) continue;
+    const key = uiString(row.product, 32);
+    const label = GROK_PRODUCT_LABELS[key] || key.replace(/^Grok/i, "").toUpperCase().slice(0, 12);
+    if (label) products.push({ label, percent: Math.max(0, Math.min(1, p / 100)) });
+  }
+  return { percent, resetsAt, products };
+}
+export function grokBillingFromUnifiedLog(text: string): { percent: number; resetsAt: string; products: { label: string; percent: number }[] } | null {
+  let latest: any = null;
+  for (const line of String(text || "").split("\n")) {
+    if (!line.includes("billing: fetched credits config")) continue;
+    const parsed = parseJsonBounded(line, 4096, 8);
+    if (parsed && typeof parsed === "object" && parsed.msg === "billing: fetched credits config") latest = parsed;
+  }
+  const ctx = latest && latest.ctx && typeof latest.ctx === "object" ? latest.ctx : null;
+  return ctx ? parseGrokCreditsConfig(ctx) : null;
+}
+function grokBillingMeters(parsed: { percent: number; resetsAt: string; products: { label: string; percent: number }[] } | null): any[] {
+  if (!parsed) return [];
+  const out: any[] = [{ label: "WEEKLY", title: "WEEKLY", percent: parsed.percent, resetsAt: parsed.resetsAt }];
+  for (const row of parsed.products.slice(0, 3)) {
+    if (row.label === "WEEKLY") continue;
+    out.push({ label: row.label, title: row.label, percent: row.percent, resetsAt: parsed.resetsAt });
+  }
+  return out;
+}
+function grokCliAccessToken(): string {
+  const path = join(process.env.GROK_HOME || join(HOME, ".grok"), "auth.json");
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    const uid = typeof process.getuid === "function" ? process.getuid() : -1;
+    if (!st.isFile() || st.nlink !== 1 || (uid >= 0 && st.uid !== uid) || (st.mode & 0o077) || st.size > 16_384) return "";
+    const buf = Buffer.allocUnsafe(st.size);
+    const n = readSync(fd, buf, 0, buf.byteLength, 0);
+    const parsed = parseJsonBounded(buf.subarray(0, n).toString("utf8"), 16_384, 8);
+    if (!parsed || typeof parsed !== "object") return "";
+    let expired = "";
+    for (const rec of Object.values(parsed)) {
+      if (!rec || typeof rec !== "object") continue;
+      const key = String((rec as any).key || "");
+      if (key.length < 20 || key.length > 4000) continue;
+      const exp = Date.parse(String((rec as any).expires_at || ""));
+      if (Number.isFinite(exp) && exp < now - 30_000) { if (!expired) expired = key; continue; }
+      return key;
+    }
+    return expired;
+  } catch { return ""; }
+  finally { if (fd >= 0) try { closeSync(fd); } catch {} }
+}
+async function fetchGrokBilling(): Promise<any | null> {
+  const token = grokCliAccessToken();
+  if (!token) return null;
+  try {
+    const r = await fetch(GROK_BILLING_URL, {
+      redirect: "error",
+      signal: AbortSignal.timeout(4000),
+      headers: {
+        Authorization: "Bearer " + token,
+        "X-XAI-Token-Auth": "xai-grok-cli",
+        Accept: "application/json",
+        "user-agent": "xai-grok-cli",
+      },
+    });
+    if (!r.ok) return null;
+    const text = await boundedStream(r.body, 16 * 1024);
+    if (text === null) return null;
+    const parsed = parseJsonBounded(text, 16 * 1024, 8);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch { return null; }
+}
+// HARD REFRESH skips the 60-second cache but not this floor, so repeated
+// clicks cannot turn into one authenticated request each.
+export const GROK_BILLING_FORCE_FLOOR_MS = 10_000;
+export function grokBillingRefreshDue(existing: any, stamp: number, force = false): boolean {
+  const attemptedAt = Number(existing && existing.attemptedAt || existing && existing.fetchedAt || 0);
+  if (attemptedAt && stamp - attemptedAt < (force ? GROK_BILLING_FORCE_FLOOR_MS : GROK_BILLING_REFRESH_MS)) return false;
+  return true;
+}
+// flock operates on the inherited stdin descriptor's open-file description.
+// Keeping our descriptor open holds the lock after flock exits; closing it
+// (including process death) releases it. Never unlink/replace the lock inode.
+async function withGrokBillingLock(directory: string, action: () => Promise<void>): Promise<void> {
+  if (!ensurePrivateStateDir(directory)) return;
+  let fd = -1;
+  try {
+    fd = openSync(join(directory, "grok-billing.lock"), constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+    const state = fstatSync(fd);
+    if (!state.isFile() || state.nlink !== 1 || state.uid !== process.getuid!() || (state.mode & 0o077) || state.size !== 0) return;
+    const proc = Bun.spawn(["/usr/bin/flock", "--nonblock", "0"], { stdin: fd, stdout: "ignore", stderr: "ignore" });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const code = await Promise.race([proc.exited, new Promise<number>(resolve => { timer = setTimeout(() => resolve(-1), 1000); })]);
+    clearTimeout(timer);
+    if (code === -1) { await terminate(proc); return; }
+    if (code !== 0) return;
+    await action();
+  } catch {}
+  finally { if (fd >= 0) try { closeSync(fd); } catch {} }
+}
+export async function refreshGrokBilling(options: {
+  directory?: string; stamp?: number; force?: boolean; enabled?: boolean;
+  fetchBilling?: () => Promise<any>; readLog?: () => string;
+} = {}) {
+  if (!(options.enabled ?? grokBillingAllowed())) return;
+  const directory = options.directory ?? STATE_DIR;
+  const cached = parseJsonBounded(readRegularFileLimited(join(directory, GROK_BILLING_FILE), 4096) || "", 4096, 8);
+  if (!grokBillingRefreshDue(cached, options.stamp ?? Date.now(), options.force ?? FORCE_REFRESH)) return;
+  await withGrokBillingLock(directory, async () => {
+    const stamp = options.stamp ?? Date.now();
+    const existing = parseJsonBounded(readRegularFileLimited(join(directory, GROK_BILLING_FILE), 4096) || "", 4096, 8);
+    if (!grokBillingRefreshDue(existing, stamp, options.force ?? FORCE_REFRESH)) return;
+    // Persist the attempt before I/O, so failures and interrupted collectors
+    // receive the same backoff as successful requests.
+    const attempted = { ...(existing && typeof existing === "object" ? existing : {}), attemptedAt: stamp };
+    if (!writePrivateStateFile(directory, GROK_BILLING_FILE, JSON.stringify(attempted) + "\n")) return;
+    const live = parseGrokCreditsConfig(await (options.fetchBilling ?? fetchGrokBilling)());
+    const fromLog = live ? null : grokBillingFromUnifiedLog(options.readLog ? options.readLog() : (readHistoryTail(join(process.env.GROK_HOME || join(HOME, ".grok"), "logs", "unified.jsonl"), 64 * 1024) || ""));
+    const parsed = live || fromLog;
+    if (!parsed) return;
+    const next = { fetchedAt: stamp, attemptedAt: stamp, source: live ? "live" : "log", percent: parsed.percent, resetsAt: parsed.resetsAt, products: parsed.products, limits: grokBillingMeters(parsed) };
+    writePrivateStateFile(directory, GROK_BILLING_FILE, JSON.stringify(next) + "\n");
+  });
+}
+function normalizeLimitRows(rows: unknown, fallbackReset = ""): any[] {
+  const out: any[] = [];
+  if (!Array.isArray(rows)) return out;
+  for (const row of rows.slice(0, 4)) {
+    if (!row || typeof row !== "object") continue;
+    const percent = Number((row as any).percent);
+    const label = uiString((row as any).label ?? (row as any).title, 32);
+    const resetsAt = uiString((row as any).resetsAt, 40) || fallbackReset;
+    if (!label || !Number.isFinite(percent) || percent < 0) continue;
+    out.push({ label, title: label, percent: Math.max(0, Math.min(1, percent)), resetsAt });
+  }
+  return out;
+}
+// A row whose window has already reset measures a period that is over. When
+// fetches keep failing the file keeps its last result, so drop it here.
+function unexpiredLimitRows(rows: any[], stamp: number): any[] {
+  return rows.filter(row => {
+    const resetsAt = Date.parse(String(row.resetsAt || ""));
+    return !(Number.isFinite(resetsAt) && resetsAt <= stamp);
+  });
+}
+// grok-billing.json is only kept fresh while the billing opt-in is on. Once it
+// is off the file is ignored, so an old percentage is never shown as current.
+// Grok CLI's own log is still read: it costs no request.
+export function grokObservedLimits(directory = STATE_DIR, liveAllowed = grokBillingAllowed(), stamp = Date.now()): any[] {
+  if (liveAllowed) {
+    const liveRaw = readRegularFileLimited(join(directory, GROK_BILLING_FILE), 4096);
+    const live = liveRaw ? parseJsonBounded(liveRaw, 4096, 8) : null;
+    const fromLive = unexpiredLimitRows(normalizeLimitRows(live && live.limits, uiString(live && live.resetsAt, 40)), stamp);
+    if (fromLive.length) return fromLive;
+  }
+  if (directory !== STATE_DIR) return [];
+  return unexpiredLimitRows(grokBillingMeters(grokBillingFromUnifiedLog(readHistoryTail(join(process.env.GROK_HOME || join(HOME, ".grok"), "logs", "unified.jsonl"), 64 * 1024) || "")), stamp);
+}
+export function withGrokObservedLimits(record: any, directory = STATE_DIR, liveAllowed = grokBillingAllowed()): any {
+  const limits = grokObservedLimits(directory, liveAllowed);
+  if (!limits.length) return record;
+  return {
+    ...record,
+    limits,
+    tierLabel: "weekly",
+    usageStatusText: "weekly pool from Grok billing, plus local " + (record.hasTokenData ? "token totals" : "session counts"),
+  };
+}
+const MAX_GROK_USAGE_SESSIONS = 256;
+// The newest session names are lstat'd to find the newest files, so the scan
+// is bounded too.
+const MAX_GROK_USAGE_CANDIDATES = 1024;
+// A real turn_completed line is under 1 KiB. A longer line is tool output.
+const MAX_GROK_TURN_LINE = 16 * 1024;
+// One pass reads at most this much, newest session first. A file not reached
+// keeps its place and is read on a later pass.
+const MAX_GROK_READ_BYTES = 16 * 1024 * 1024;
+const MAX_GROK_READ_MS = 150;
+const GROK_READ_CHUNK = 1024 * 1024;
+const MAX_GROK_FILE_MODELS = 16;
+const MAX_GROK_TURN_IDS = 512;
+// readJson refuses a prev file over MAX_JSON_NODES, which would lose every
+// other field kept there, so the Grok entries stay well under it.
+const MAX_GROK_PREV_NODES = 20_000;
+const GROK_USAGE_VERSION = "grok-usage-v3";
+const GROK_TURN_NEEDLE = Buffer.from('"sessionUpdate":"turn_completed"');
+let currentGrokUsageFiles: any = null;
+
+function nToken(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+function addTokenUsage(into: TokenUsage, add: TokenUsage): void {
+  into.inputTokens += add.inputTokens;
+  into.outputTokens += add.outputTokens;
+  into.cacheReadInputTokens += add.cacheReadInputTokens;
+  into.cacheCreationInputTokens += add.cacheCreationInputTokens;
+}
+function tokenTotal(u: TokenUsage): number {
+  return u.inputTokens + u.outputTokens + u.cacheReadInputTokens + u.cacheCreationInputTokens;
+}
+// Burn leaves out cache reads, the rule opencodeUsageFromRows states.
+function tokenBurn(u: TokenUsage): number {
+  return u.inputTokens + u.outputTokens + u.cacheCreationInputTokens;
+}
+// Grok's usage block overlaps: on every local updates.jsonl line checked,
+// totalTokens is inputTokens + outputTokens, cachedReadTokens is part of
+// inputTokens and reasoningTokens is no larger than outputTokens. So cached
+// reads come out of input, and output is taken as it is. That reasoning sits
+// inside output is inferred from the total, xAI does not document it.
+// cacheCreationTokens has only been seen as 0, so it stays separate, as
+// Claude reports it.
+function grokTokenFields(raw: any): TokenUsage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const cacheRead = nToken(raw.cachedReadTokens);
+  const usage: TokenUsage = {
+    inputTokens: Math.max(0, nToken(raw.inputTokens) - cacheRead),
+    outputTokens: nToken(raw.outputTokens),
+    cacheReadInputTokens: cacheRead,
+    cacheCreationInputTokens: nToken(raw.cacheCreationTokens),
+  };
+  return tokenTotal(usage) > 0 ? usage : null;
+}
+function stampOfUpdate(value: any): number {
+  const raw = value && typeof value === "object" ? value.timestamp : 0;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw > 1e12 ? raw : raw * 1000;
+  const parsed = Date.parse(String(raw || ""));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+export type GrokTurn = { id: string; ts: number; models: Record<string, TokenUsage> };
+// Grok writes one usage record per turn, not a running total: each
+// turn_completed update has its own prompt_id, and modelCalls and inputTokens
+// fall between turns. Only that exact record shape counts, so a usage-shaped
+// object inside tool or model output is never read as usage.
+export function grokTurnFromUpdate(value: any, sessionId: string, stamp = now): GrokTurn | null {
+  if (!sessionId || !value || typeof value !== "object" || value.method !== "_x.ai/session/update") return null;
+  const params = value.params;
+  if (!params || typeof params !== "object" || params.sessionId !== sessionId) return null;
+  const update = params.update;
+  if (!update || typeof update !== "object" || update.sessionUpdate !== "turn_completed") return null;
+  const id = update.prompt_id;
+  if (typeof id !== "string" || !id || id.length > 128) return null;
+  const usage = update.usage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+  const meta = params._meta && typeof params._meta === "object" ? Number(params._meta.agentTimestampMs) : 0;
+  const ts = plausibleTimestamp(meta, stamp) ? meta : stampOfUpdate(value);
+  if (!plausibleTimestamp(ts, stamp)) return null;
+  const models: Record<string, TokenUsage> = {};
+  const rawModels = usage.modelUsage && typeof usage.modelUsage === "object" && !Array.isArray(usage.modelUsage) ? usage.modelUsage : {};
+  for (const [name, raw] of Object.entries(rawModels).slice(0, 16)) {
+    const model = grokTokenFields(raw);
+    const key = uiString(name, 64);
+    if (model && key) models[key] = model;
+  }
+  if (!Object.keys(models).length) {
+    const totals = grokTokenFields(usage);
+    if (!totals) return null;
+    models.grok = totals;
+  }
+  return { id, ts, models };
+}
+// One entry per updates.jsonl, kept in the prev file: how far it has been read
+// and what its turns added up to, so a pass reads only new bytes.
+export type GrokFileEntry = {
+  ino: number; offset: number; skip: boolean; turns: number; ids: string[];
+  lifetime: Record<string, TokenUsage>; days: Record<string, Record<string, number>>;
+};
+export function emptyGrokFileEntry(ino = 0): GrokFileEntry {
+  return { ino, offset: 0, skip: false, turns: 0, ids: [], lifetime: {}, days: {} };
+}
+function emptyTokenUsage(): TokenUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+}
+// The prompt_id set spans every file, so a turn is counted in one file only.
+// Grok's docs say /fork starts from a copy of the conversation. Whether that
+// copies the parent's turn records, and under which sessionId, is not
+// verified. Each file keeps the ids of its last MAX_GROK_TURN_IDS turns.
+function addGrokTurn(entry: GrokFileEntry, turn: GrokTurn, seen: Set<string>, keepDays: Set<string>): void {
+  const id = Bun.hash(turn.id).toString(36);
+  if (seen.has(id)) return;
+  seen.add(id);
+  entry.ids.push(id);
+  if (entry.ids.length > MAX_GROK_TURN_IDS) entry.ids.splice(0, entry.ids.length - MAX_GROK_TURN_IDS);
+  entry.turns++;
+  const day = localDayKey(turn.ts);
+  for (const [name, usage] of Object.entries(turn.models)) {
+    const model = entry.lifetime[name] || Object.keys(entry.lifetime).length < MAX_GROK_FILE_MODELS ? name : "other";
+    addTokenUsage(entry.lifetime[model] ||= emptyTokenUsage(), usage);
+    if (!keepDays.has(day)) continue;
+    const models = entry.days[day] ||= {};
+    models[model] = (models[model] || 0) + tokenBurn(usage);
+  }
+}
+// Folds the complete lines of a chunk read at entry.offset and returns the
+// bytes consumed. A trailing partial line is left for the next read, so a line
+// Grok is still writing is read whole later. A line longer than
+// MAX_GROK_TURN_LINE is dropped without being buffered, across reads if needed.
+export function foldGrokTurnsChunk(entry: GrokFileEntry, chunk: Buffer, sessionId: string, seen: Set<string>, dayKeys: string[], stamp = now): number {
+  const keepDays = new Set(dayKeys);
+  let position = 0;
+  if (entry.skip) {
+    const newline = chunk.indexOf(10);
+    if (newline < 0) return chunk.length;
+    position = newline + 1;
+    entry.skip = false;
+  }
+  let hit = chunk.indexOf(GROK_TURN_NEEDLE, position);
+  while (position < chunk.length) {
+    const newline = chunk.indexOf(10, position);
+    if (newline < 0) {
+      if (chunk.length - position <= MAX_GROK_TURN_LINE) return position;
+      entry.skip = true;
+      return chunk.length;
+    }
+    if (hit >= 0 && hit < position) hit = chunk.indexOf(GROK_TURN_NEEDLE, position);
+    if (hit >= 0 && hit < newline && newline - position <= MAX_GROK_TURN_LINE) {
+      const turn = grokTurnFromUpdate(parseJsonBounded(chunk.toString("utf8", position, newline), 2048, 12), sessionId, stamp);
+      if (turn) addGrokTurn(entry, turn, seen, keepDays);
+    }
+    position = newline + 1;
+  }
+  return position;
+}
+type GrokReadBudget = { bytes: number; deadline: number; buffer: Buffer | null };
+function readGrokUpdates(path: string, entry: GrokFileEntry, sessionId: string, seen: Set<string>, budget: GrokReadBudget, dayKeys: string[]): void {
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const opened = fstatSync(fd);
+    // Replaced or truncated since the lstat: the next pass starts it again.
+    if (!opened.isFile() || opened.ino !== entry.ino || opened.size < entry.offset) return;
+    const buffer = budget.buffer ||= Buffer.allocUnsafe(GROK_READ_CHUNK);
+    while (entry.offset < opened.size && budget.bytes > 0 && performance.now() < budget.deadline) {
+      const bytes = readSync(fd, buffer, 0, Math.min(buffer.byteLength, opened.size - entry.offset, budget.bytes), entry.offset);
+      if (bytes <= 0) break;
+      budget.bytes -= bytes;
+      const consumed = foldGrokTurnsChunk(entry, buffer.subarray(0, bytes), sessionId, seen, dayKeys);
+      entry.offset += consumed;
+      if (!consumed) break;
+    }
+  } catch {}
+  finally { if (fd >= 0) try { closeSync(fd); } catch {} }
+}
+// A resumed old session keeps its old id, so recency is the file's mtime.
+export function newestGrokFiles<T extends { mtimeMs: number }>(files: T[], keep = MAX_GROK_USAGE_SESSIONS): T[] {
+  return files.slice().sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, keep);
+}
+function grokUsageNumbers(value: any, keys: string[]): boolean {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length <= keys.length && keys.every(key => Number.isFinite(value[key]) && value[key] >= 0);
+}
+function grokModelMap(value: any, check: (item: any) => boolean): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length <= MAX_GROK_FILE_MODELS + 1 && entries.every(([name, item]) => !!name && uiString(name, 64) === name && check(item));
+}
+const TOKEN_USAGE_KEYS = ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"];
+// Anything out of shape drops the entry, and the file is read again from the
+// start rather than trusted.
+export function grokEntryFromPrev(raw: any): GrokFileEntry | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
+  if (!count(raw.ino) || !count(raw.offset) || !count(raw.turns) || typeof raw.skip !== "boolean" || typeof raw.ids !== "string") return null;
+  const ids = raw.ids ? raw.ids.split(",") : [];
+  if (ids.length > MAX_GROK_TURN_IDS || !ids.every((id: string) => /^[0-9a-z]{1,16}$/.test(id))) return null;
+  if (!grokModelMap(raw.lifetime, item => grokUsageNumbers(item, TOKEN_USAGE_KEYS))) return null;
+  if (!raw.days || typeof raw.days !== "object" || Array.isArray(raw.days)) return null;
+  const days = Object.entries(raw.days);
+  if (days.length > 62 || !days.every(([day, models]) => /^\d{4}-\d{2}-\d{2}$/.test(day)
+    && grokModelMap(models, burn => Number.isFinite(burn) && burn >= 0))) return null;
+  return { ino: raw.ino, offset: raw.offset, skip: raw.skip, turns: raw.turns, ids, lifetime: raw.lifetime, days: raw.days };
+}
+function grokUsageFilesFromPrev(raw: any): Map<string, GrokFileEntry> {
+  const out = new Map<string, GrokFileEntry>();
+  if (!raw || typeof raw !== "object" || raw.v !== GROK_USAGE_VERSION || !raw.files || typeof raw.files !== "object") return out;
+  for (const [path, value] of Object.entries(raw.files).slice(0, MAX_GROK_USAGE_SESSIONS)) {
+    const entry = grokEntryFromPrev(value);
+    if (entry) out.set(path, entry);
+  }
+  return out;
+}
+// Entries arrive newest first and are kept up to the node budget. Days
+// outside the heat window are dropped, lifetime keeps everything.
+export function grokUsageFilesForPrev(files: Array<[string, GrokFileEntry]>, dayKeys: string[]): { v: string; files: Record<string, any> } {
+  const keepDays = new Set(dayKeys);
+  const out: Record<string, any> = {};
+  let nodes = 3;
+  for (const [path, entry] of files) {
+    const days: Record<string, Record<string, number>> = {};
+    let size = 8 + Object.keys(entry.lifetime).length * 5;
+    for (const [day, models] of Object.entries(entry.days)) {
+      if (!keepDays.has(day)) continue;
+      days[day] = models;
+      size += 1 + Object.keys(models).length;
+    }
+    if (nodes + size > MAX_GROK_PREV_NODES) break;
+    nodes += size;
+    out[path] = { ino: entry.ino, offset: entry.offset, skip: entry.skip, turns: entry.turns, ids: entry.ids.join(","), lifetime: entry.lifetime, days };
+  }
+  return { v: GROK_USAGE_VERSION, files: out };
+}
+function localUsageRecord(fields: {
+  name: string; todayPrompts: number; todaySessions: number; todayTotalTokens: number;
+  totalPrompts: number; totalSessions: number;
+  modelUsage: Record<string, TokenUsage>; todayTokensByModel: Record<string, number>;
+  recentDays: Array<{ date: string; messageCount: number }>;
+}): any {
+  return normalizeUsage({
+    name: fields.name, ready: true, tierLabel: "local", limits: [],
+    usageStatusText: LOCAL_USAGE_STATUS,
+    todayPrompts: fields.todayPrompts, todaySessions: fields.todaySessions, todayTotalTokens: fields.todayTotalTokens,
+    totalPrompts: fields.totalPrompts, totalSessions: fields.totalSessions, updatedAt: now,
+    modelUsage: fields.modelUsage, todayTokensByModel: fields.todayTokensByModel, recentDays: fields.recentDays,
+  });
+}
+// Each pass sums the per-file entries again, so a new local day needs no
+// cache key. HARD REFRESH has nothing to bypass here: every new byte is read.
+function grokLocalUsage(): any | null {
+  const base = process.env.GROK_HOME || join(HOME, ".grok");
+  const root = join(base, "sessions");
+  // Session ids are UUIDv7, so the highest names are the newest sessions,
+  // whatever order the filesystem lists them in. The newest by name across
+  // every group are lstat'd, then ordered by mtime. A resumed session older
+  // than the newest MAX_GROK_USAGE_CANDIDATES by name is not seen.
+  const named: Array<{ groupPath: string; name: string }> = [];
+  for (const group of ls(root).slice(0, MAX_COLLECTION_ITEMS)) {
+    const groupPath = join(root, group);
+    try { const state = lstatSync(groupPath); if (state.isSymbolicLink() || !state.isDirectory()) continue; } catch { continue; }
+    const names = ls(groupPath).filter(name => cleanSessionId(name) === name).sort().reverse().slice(0, MAX_GROK_USAGE_CANDIDATES);
+    for (const name of names) named.push({ groupPath, name });
+  }
+  named.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
+  const candidates: Array<{ path: string; sessionId: string; ino: number; size: number; mtimeMs: number }> = [];
+  for (const { groupPath, name } of named.slice(0, MAX_GROK_USAGE_CANDIDATES)) {
+    const path = join(groupPath, name, "updates.jsonl");
+    try {
+      const state = lstatSync(path);
+      if (state.isSymbolicLink() || !state.isFile()) continue;
+      candidates.push({ path, sessionId: name, ino: state.ino, size: state.size, mtimeMs: state.mtimeMs });
+    } catch { continue; }
+  }
+  if (!candidates.length) return null;
+  const files = newestGrokFiles(candidates);
+  const cached = grokUsageFilesFromPrev(prev.grokUsageFiles);
+  const entries: Array<[string, GrokFileEntry]> = files.map(file => {
+    const entry = cached.get(file.path);
+    // A new inode or a shorter file is a replaced or truncated session.
+    return [file.path, entry && entry.ino === file.ino && entry.offset <= file.size ? entry : emptyGrokFileEntry(file.ino)];
+  });
+  const seen = new Set<string>();
+  for (const [, entry] of entries) for (const id of entry.ids) seen.add(id);
+  const dayKeys = heatDays.map(localDayKey);
+  const budget: GrokReadBudget = { bytes: MAX_GROK_READ_BYTES, deadline: performance.now() + MAX_GROK_READ_MS, buffer: null };
+  files.forEach((file, index) => {
+    const entry = entries[index][1];
+    if (file.size > entry.offset && budget.bytes > 0) readGrokUpdates(file.path, entry, file.sessionId, seen, budget, dayKeys);
+  });
+  currentGrokUsageFiles = grokUsageFilesForPrev(entries, dayKeys);
+  const today = localDayKey(now);
+  const modelUsage: Record<string, TokenUsage> = {};
+  const todayTokensByModel: Record<string, number> = {};
+  const daily = new Map<string, number>();
+  let sessions = 0, todaySessions = 0;
+  for (const [, entry] of entries) {
+    if (!entry.turns) continue;
+    sessions++;
+    for (const [model, usage] of Object.entries(entry.lifetime)) addTokenUsage(modelUsage[model] ||= emptyTokenUsage(), usage);
+    for (const [day, models] of Object.entries(entry.days)) {
+      for (const [model, burn] of Object.entries(models)) {
+        daily.set(day, (daily.get(day) || 0) + burn);
+        if (day === today) todayTokensByModel[model] = (todayTokensByModel[model] || 0) + burn;
+      }
+    }
+    if (Object.values(entry.days[today] || {}).some(burn => burn > 0)) todaySessions++;
+  }
+  if (!sessions) return null;
+  return localUsageRecord({
+    name: "Grok",
+    todayPrompts: counts.grok?.today || 0, todaySessions, todayTotalTokens: daily.get(today) || 0,
+    totalPrompts: counts.grok?.total || 0, totalSessions: sessions,
+    modelUsage, todayTokensByModel,
+    recentDays: dayKeys.map(date => ({ date, messageCount: daily.get(date) || 0 })),
+  });
+}
+const CLAUDE_AUTH_REFRESH_MS = 15 * 60 * 1000;
+// One host-wide clock in a shared state file, written before the CLI is
+// spawned, so a collector killed mid-refresh still backs off.
+const CLAUDE_AUTH_REFRESH_FILE = "claude-auth-refresh.json";
+// The CLI refresh runs from the wallpaper collector only, the same one-writer
+// rule as GitHub and FLEET, and HARD REFRESH does not bypass the 15 minutes:
+// forcing skips caches, never this limit.
+export function claudeRefreshDue(lastAt: number, stamp: number, expired: boolean, instance: string): boolean {
+  if (!expired || instance === "overlay") return false;
+  return !(lastAt > 0 && stamp - lastAt < CLAUDE_AUTH_REFRESH_MS);
+}
+function lastClaudeAuthRefreshAt(directory = STATE_DIR): number {
+  const parsed = parseJsonBounded(readRegularFileLimited(join(directory, CLAUDE_AUTH_REFRESH_FILE), 1024) || "", 1024, 4);
+  const at = Number(parsed && typeof parsed === "object" ? parsed.attemptedAt : 0);
+  return Number.isFinite(at) && at > 0 ? at : 0;
+}
+let claudeUsageFresh: any = null;
+
+export function claudeOauthExpiredAt(expiresAt: unknown, nowMs = now): boolean {
+  const n = Number(expiresAt);
+  return Number.isFinite(n) && n > 0 && n <= nowMs;
+}
+
+function claudeOauthExpired(): boolean {
+  const path = join(process.env.CLAUDE_CONFIG_DIR || join(HOME, ".claude"), ".credentials.json");
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    const uid = typeof process.getuid === "function" ? process.getuid() : -1;
+    if (!st.isFile() || st.nlink !== 1 || (uid >= 0 && st.uid !== uid) || (st.mode & 0o077) || st.size > 16_384) return false;
+    const buf = Buffer.allocUnsafe(st.size);
+    const n = readSync(fd, buf, 0, buf.byteLength, 0);
+    const parsed = parseJsonBounded(buf.subarray(0, n).toString("utf8"), 16_384, 8);
+    const oauth = parsed && typeof parsed === "object" ? (parsed as any).claudeAiOauth : null;
+    if (!oauth || typeof oauth !== "object") return false;
+    return claudeOauthExpiredAt(oauth.expiresAt);
+  } catch { return false; }
+  finally { if (fd >= 0) try { closeSync(fd); } catch {} }
+}
+
+async function refreshClaudeAuthIfNeeded() {
+  try {
+    if (!claudeRefreshAllowed()) return;
+    if (!FORCE_REFRESH && instanceId() === "overlay") return;
+    const expired = claudeOauthExpired();
+    if (!FORCE_REFRESH && !expired) return;
+    if (expired) {
+      if (!claudeRefreshDue(lastClaudeAuthRefreshAt(), now, expired, instanceId())) return;
+      const claude = Bun.which("claude");
+      if (!claude) return;
+      if (!writePrivateStateFile(STATE_DIR, CLAUDE_AUTH_REFRESH_FILE, JSON.stringify({ attemptedAt: now }) + "\n")) return;
+      await run([claude, "-p", "ping", "--max-turns", "0", "--output-format", "json"], 12_000);
+    }
+    const collector = join(process.env.OMARCHY_PATH || "/usr/share/omarchy", "bin/omarchy-agent-usage-claude");
+    if (!existsSync(collector)) return;
+    const text = await run([collector, "--limits-only"], 8_000);
+    const parsed = parseJsonBounded(text, 4000, 12);
+    if (parsed && typeof parsed === "object" && parsed.id === "claude") claudeUsageFresh = parsed;
+  } catch {}
+}
+
 // Grok publishes no usage cache the way Claude and Codex do: Omarchy ships no
 // collector for it, it bills credits rather than rate-limit windows, and
 // `/usage` opens billing in a browser. What it does keep on disk is one
@@ -2794,7 +3393,7 @@ export function grokSessionUsage(base: string): { sessions: number; todaySession
 function grokUsage() {
   const base = process.env.GROK_HOME || join(HOME, ".grok");
   if (!existsSync(base)) return null;
-  const { sessions, todaySessions, models, modelSessions } = grokSessionUsage(base);
+  const { sessions, todaySessions, modelSessions } = grokSessionUsage(base);
   const prompts = counts.grok || { today: 0, week: 0, total: 0 };
   return normalizeUsage({
     name: "Grok",
@@ -2824,11 +3423,16 @@ function agentsUsage() {
     const j = text === null ? null : parseJsonBounded(text, 4000, 12);
     if (!j || typeof j !== "object") continue;
     const key = uiString(f.replace(/\.json$/, ""), 32);
-    if (key) out[key] = normalizeUsage(j);
+    if (!key) continue;
+    out[key] = key === "claude" && claudeUsageFresh ? normalizeUsage(claudeUsageFresh) : normalizeUsage(j);
   }
-  // Only when Omarchy has not grown a collector of its own; a real cache is
-  // always better than what can be inferred from the session directories.
-  if (!out.grok) { const grok = grokUsage(); if (grok) out.grok = grok; }
+  // Omarchy does not ship a grok collector. Fill that row from local session
+  // files. Never write into Omarchy's usage directory, and never replace a
+  // record Omarchy already produced.
+  if (!out.grok) {
+    const grok = grokLocalUsage() || grokUsage();
+    if (grok) out.grok = withGrokObservedLimits(grok);
+  }
   // Same rule: a real Omarchy cache always wins over what we can infer.
   if (!out.opencode) { const oc = opencodeUsage(); if (oc) out.opencode = normalizeUsage(oc); }
   return out;
@@ -3013,6 +3617,8 @@ async function runCollector() {
   const pids = scanProcs();
   const [cpuS, memS, diskS, netS, pingS, gpuS, sessions, ollama, externalIpS, github, gitea, containers, fleet, hermesUsage] = await Promise.all([
     Promise.resolve(cpu()), Promise.resolve(mem()), disk(), net(), ping(), gpu(), liveSessions(pids), ollamaState(), externalIp(), githubActivity(), giteaActivity(), containerState(), fleetActivity(), hermesUsageActivity(),
+    grokBillingAllowed() ? refreshGrokBilling() : undefined,
+    claudeRefreshAllowed() ? refreshClaudeAuthIfNeeded() : undefined,
   ]);
   const claude = claudeHistory(), codex = codexHistory(), grok = grokHistory(), grokBot = grokBotHistory(), opencode = opencodeHistory(), pi = piHistory(), hermes = hermesHistory(), kimi = kimiHistory(), cursor = cursorHistory();
   // Same priority as grok's own fallback below: a real cache (Omarchy's own
@@ -3071,6 +3677,7 @@ async function runCollector() {
       topicSummaries,
       ciByRepo: currentCiByRepo,
       opencodeTotals: currentOpencodeTotals,
+      grokUsageFiles: currentGrokUsageFiles,
       sessionNotifications: notificationState.tracked,
     }));
   } catch {}

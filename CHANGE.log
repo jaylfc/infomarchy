@@ -16,6 +16,34 @@ Backfill pending; the release history itself is in CHANGELOG.md.
 
 ---
 
+## 2026-09-30
+
+### Local usage collection, an optional billing meter, and HARD REFRESH (#16)
+
+**TechLuddite** · GitHub [@TechLuddite](https://github.com/TechLuddite) · X [@gh_TechLuddite](https://x.com/gh_TechLuddite)
+
+HARD REFRESH is the first chip in the module strip, with IPC for the desk and
+the overlay; it bypasses the GitHub, external-IP and Grok billing caches. Grok
+token totals now come from Grok's own local session files when Omarchy has no
+record for it, and USAGE renders each provider as its own tinted block.
+
+The whole 09-18 review came back as one commit per item, and all of it checks out
+here:
+- Both outbound paths are opt-in now, enable flags instead of skip flags:
+  `INFOMARCHY_ALLOW_GROK_BILLING=1` and `INFOMARCHY_ALLOW_CLAUDE_REFRESH=1`.
+  Nothing spends against an AI account unless asked.
+- Both are gated on the USAGE card being on screen, passed as the `--usage-visible`
+  argv flag rather than an environment variable, so an inherited environment cannot
+  claim the card is visible. Proven live: flag alone is false, card alone is false,
+  both together is true.
+- HARD REFRESH no longer bypasses the Claude spend throttle. Forcing skips caches,
+  never the limiter, and a forced Grok billing fetch still waits 10 seconds.
+- The declarative collector command is back, so a future `collector.running = true`
+  cannot silently drop `--demo`, and the unreachable return in
+  `grokCliAccessToken()` is gone.
+
+477 tests pass on the merged tree. Fourth contribution from this author.
+
 ## 2026-09-22
 
 ### Event-driven refresh on top of the poll (#39)

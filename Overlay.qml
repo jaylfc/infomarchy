@@ -12,7 +12,7 @@ Scope {
   id: root
   property bool opened: false
 
-  InfoModel { id: infoModel; refreshMs: 3000; active: root.opened; instance: "overlay"; demoMode: demoMarker.present; ollamaHost: dashboardSettings.ollamaHost }
+  InfoModel { id: infoModel; refreshMs: 3000; active: root.opened; instance: "overlay"; demoMode: demoMarker.present; ollamaHost: dashboardSettings.ollamaHost; usageVisible: root.opened && dashboardSettings.ready && dashboardSettings.dashboardVisible && dashboardSettings.sectionEnabled("usage") }
   InfoSettings { id: dashboardSettings }
   // Demo mode is set on the wallpaper service; a screenshot taken with the
   // overlay open must not leak live prompts. Mirror the runtime marker.
@@ -57,6 +57,7 @@ Scope {
   // `omarchy-shell shell call nixfred.infomarchy refresh` hits the overlay
   // loader, not the wallpaper IpcHandler.
   function refresh() { infoModel.refresh() }
+  function hardRefresh() { infoModel.hardRefresh() }
 
   Variants {
     model: Quickshell.screens
