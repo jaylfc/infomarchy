@@ -21,6 +21,7 @@ import { deriveNotificationEvents } from "./notification-events";
 import { containerEngine, containerListArgv, parseContainerList } from "./container-control";
 import { fleetEnabled, fleetHostsFromEnv, fleetRefreshDue, fleetSnapshot, parseFleetStoreText, refreshFleet } from "./fleet-remote";
 import { hermesUsageRefreshDue, hermesUsageSummary, parseHermesUsageStoreText, refreshHermesUsage } from "./hermes-usage";
+import { validOrcaHandle } from "./orca-focus";
 import { fleetSessionsEnabled, fleetSessionsPayload, fleetSessionsRefreshDue, mergeFleetSessions, parseFleetSessionStoreText, refreshFleetSessions } from "./fleet-sessions";
 
 const HOME = process.env.HOME || "/root";
@@ -820,7 +821,7 @@ function contextId(value: unknown): string {
   return /^[A-Za-z0-9%][A-Za-z0-9_.:%-]{0,127}$/.test(id) ? id : "";
 }
 export type SessionHost = {
-  kind: "herdr" | "boomux" | "tmux" | "background";
+  kind: "orca" | "herdr" | "boomux" | "tmux" | "background";
   label: string;
   workspace?: string;
   workspaceId?: string;
@@ -842,6 +843,11 @@ export type SessionHost = {
   // Herdr: the session socket the agent's environment points at, so a click
   // can address the same server the agent lives in.
   socket?: string;
+  // Orca: the terminal tab this agent types into. `orca terminal switch`
+  // takes it directly.
+  handle?: string;
+  // Orca: the worktree path the tab was opened in, for the card's label only.
+  worktree?: string;
 };
 export function herdrSocketFromEnvironment(environ = ""): string {
   const socket = String(envValue(environ, "HERDR_SOCKET_PATH") || "");
@@ -859,16 +865,35 @@ export function backgroundDaemonKind(cmd: string[]): string {
   if (/(^|\/)claude bg-pty-host$/.test(head) || (/(^|\/)claude$/.test(head) && cmd[1] === "bg-pty-host")) return "claude";
   return "";
 }
+export function orcaHandleFromEnvironment(environ = ""): string {
+  return validOrcaHandle(envValue(environ, "ORCA_TERMINAL_HANDLE"));
+}
 export function sessionHostsFromEnvironment(environ = ""): SessionHost[] {
   const hosts: SessionHost[] = [];
+  // Orca is resolved FIRST and suppresses the multiplexer variables below,
+  // because an Orca-hosted agent inherits the terminal Orca itself was
+  // launched from. Measured on this desk 2026-09-30: Orca was started from a
+  // Herdr pane, so six unrelated Orca agents all carried HERDR_ENV=1 and the
+  // identical HERDR_PANE_ID=w30:p1, and every one of their cards jumped to
+  // that single pane instead of the agent. The inherited ids are real and
+  // live, which is exactly why trusting them fails silently.
+  const orcaHandle = orcaHandleFromEnvironment(environ);
+  if (orcaHandle) {
+    // ORCA_WORKTREE_ID is "<uuid>::<path>"; only the path is worth showing.
+    const worktree = contextValue(String(envValue(environ, "ORCA_WORKTREE_ID") || "").split("::").pop() || "", 128);
+    const name = worktree ? worktree.split("/").filter(Boolean).pop() || "" : "";
+    hosts.push({ kind: "orca", label: "Orca" + (name ? " / " + name : ""), handle: orcaHandle, worktree });
+  }
+  // Only the inherited-terminal kinds are suppressed. A tmux session started
+  // INSIDE an Orca tab is the agent's own and still addresses its real pane.
   const herdrPane = contextId(envValue(environ, "HERDR_PANE_ID"));
   const herdrWorkspace = contextId(envValue(environ, "HERDR_WORKSPACE_ID"));
   const herdrTab = contextId(envValue(environ, "HERDR_TAB_ID"));
-  if (envValue(environ, "HERDR_ENV") === "1" && (herdrPane || herdrWorkspace || herdrTab)) {
+  if (!orcaHandle && envValue(environ, "HERDR_ENV") === "1" && (herdrPane || herdrWorkspace || herdrTab)) {
     const parts = [herdrWorkspace, herdrTab, herdrPane].filter(Boolean);
     hosts.push({ kind: "herdr", label: "Herdr " + parts.join(" / "), workspaceId: herdrWorkspace, tabId: herdrTab, paneId: herdrPane, socket: herdrSocketFromEnvironment(environ) });
   }
-  const boomuxShellId = contextId(envValue(environ, "BOOMUX_SHELL_ID"));
+  const boomuxShellId = orcaHandle ? "" : contextId(envValue(environ, "BOOMUX_SHELL_ID"));
   if (boomuxShellId) {
     const workspace = contextValue(envValue(environ, "BOOMUX_WORKSPACE"), 64);
     const shell = contextValue(envValue(environ, "BOOMUX_SHELL_NAME"), 64);
@@ -1591,6 +1616,17 @@ async function liveSessions(pids: number[]) {
     for (const ancestor of processAncestors(p.pid).slice(1)) {
       const daemon = backgroundDaemonKind(cmdByPid.get(ancestor) || []);
       if (daemon) { hosts.push({ kind: "background", label: "background · " + daemon + " daemon" }); break; }
+    }
+    // A daemon-hosted session has no terminal: it was reparented to systemd
+    // and the multiplexer ids still in its environment belong to whoever
+    // launched it, which is usually the interactive agent in the same repo.
+    // Measured 2026-09-30: a background session and the interactive one beside
+    // it both claimed Herdr pane w3T:p1, so the desk showed what looked like a
+    // duplicate card whose click jumped to the OTHER session. Keep the
+    // background host, which knows how to attach, and drop the borrowed ones.
+    if (hosts.some(host => host.kind === "background")) {
+      for (let i = hosts.length - 1; i >= 0; i--)
+        if (hosts[i].kind === "orca" || hosts[i].kind === "herdr" || hosts[i].kind === "boomux") hosts.splice(i, 1);
     }
     const tmuxHost = hosts.find(host => host.kind === "tmux");
     const tmuxSocket = tmuxSocketFromEnvironment(environ);

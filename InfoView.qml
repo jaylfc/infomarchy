@@ -391,6 +391,9 @@ Item {
   }
   function sessionHostDetail(item) {
     return (item.hosts || []).map(function(host) {
+      // The tab handle is what the inspector can act on, and its short form is
+      // what `orca terminal list` prints beside the tab title.
+      if (host.kind === "orca") return "Orca tab " + String(host.handle || "—").replace(/^term_/, "").slice(0, 8) + (host.worktree ? " · " + String(host.worktree) : "")
       if (host.kind === "boomux") return "Boomux shell " + String(host.shellId || "—").slice(0, 8) + " · run " + String(host.runId || "—").slice(0, 8)
       if (host.kind === "herdr") return "Herdr " + [host.workspaceId, host.tabId, host.paneId].filter(Boolean).join(" / ")
       if (host.kind === "tmux") return "tmux " + String(host.session || "?") + ":" + String(host.window || "?") + "." + String(host.pane || "?") + " · pane " + String(host.paneId || "—")
