@@ -34,9 +34,14 @@ const CEILINGS: Record<string, number> = {
   // same false positive root.deskView already produces in this file.
   // +2 (#38): deskWorkspaceMatches reads dashboardSettings from inside the
   // same PanelWindow, the same false positive again.
-  "Infomarchy.qml": 32,
+  // +1 (#25): the Web Mode listener Process has an onExited handler, the
+  // same exit-status metadata warning every other Process handler produces.
+  "Infomarchy.qml": 33,
   "InfoModel.qml": 6,
-  "InfoSettings.qml": 0,
+  // 3 (#25): the settings writer, the RETRY SETUP launcher and the WEB
+  // prerequisite check are Processes with onExited handlers, which qmllint
+  // cannot type without QProcess.
+  "InfoSettings.qml": 3,
   // 509 came in with privacy mode (#17). The two above it are the topic mask
   // folded into that merge: qmllint cannot resolve a view-scoped function, so
   // each call site of displayTopic reads as a missing property, exactly like
@@ -53,9 +58,17 @@ const CEILINGS: Record<string, number> = {
   // +6 (#16): the HARD REFRESH chip and the tinted provider blocks: dynamic
   // Style properties and unqualified delegate accesses, the same
   // false-positive shape counted above.
-  "InfoView.qml": 599,
+  // +3 (#25): the SETTINGS drawer panel reads Style.spacing.md (twice) and
+  // Style.font.subtitle, dynamic Style properties qmllint sees as QObject.
+  "InfoView.qml": 602,
   "Overlay.qml": 29,
   "WaveWallpaper.qml": 0,
+  // Settings drawer (#25): dynamic Style properties qmllint sees as QObject,
+  // modelData reads inside nested delegate children, and Process exit-status
+  // metadata. ComponentBehavior: Bound keeps outer-id reads resolvable.
+  // Covered by real offscreen QML tests too. +5: the bounded token and CIDR
+  // list (ScrollList) reads Style.spacing.md four times and Style.font.caption.
+  "SettingsBody.qml": 100,
 };
 
 // Findings that exist only because the plugin deliberately survives an Omarchy

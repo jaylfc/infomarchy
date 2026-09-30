@@ -18,6 +18,38 @@ Backfill pending; the release history itself is in CHANGELOG.md.
 
 ## 2026-09-30
 
+### Web Mode: the desk in a browser over Tailscale or manual HTTPS (#25)
+
+**TechLuddite** · GitHub [@TechLuddite](https://github.com/TechLuddite) · X [@gh_TechLuddite](https://x.com/gh_TechLuddite)
+
+The desk renders as a page for a phone or a second machine. Two access modes
+only, both encrypted: Tailscale Serve, and manual HTTPS with an existing
+certificate. Off by default, and turning it on takes an explicit, persisted
+true.
+
+**LAN HTTP is gone, as asked at review.** It bound 0.0.0.0:8787 with no TLS and
+carried the bearer token in the URL path, so the desk and a live credential
+crossed the network in cleartext. The backend is loopback-only behind Tailscale
+Serve; manual HTTPS serves its own pinned certificate; a saved "lan" mode loads
+with WEB off and starts nothing, and there is no plain-HTTP fallback anywhere.
+
+Also fixed from the review, each as its own commit:
+- viewer links minted while LAN HTTP existed are replaced once, under a lock,
+  on the grounds they may already have crossed the wire (CONFIG_VERSION 2).
+- `url` prints the token id and last four characters; the full link needs
+  `--reveal`, so a status check cannot leave a live credential in scrollback.
+- token-revoke now tells "no such id" from "that is the last token".
+- privacy default matches #17: only a saved literal true masks.
+- the SETTINGS drawer fits 1600x1000 in three columns with no page scroll,
+  and the test prints the measurement: content 755 against a 755 viewport.
+
+Merged on top of #16. Two conflicts, both taken as unions: the InfoView resolve
+ceiling (#16's +6 and this PR's +3 over the same base, so 602 with both reasons
+kept) and the InfoModel line in Infomarchy.qml, which now carries #16's
+usageVisible and this PR's webEnabled in `active`.
+
+555 tests pass on the merged tree. Fifth contribution from this author.
+
 ### Local usage collection, an optional billing meter, and HARD REFRESH (#16)
 
 **TechLuddite** · GitHub [@TechLuddite](https://github.com/TechLuddite) · X [@gh_TechLuddite](https://x.com/gh_TechLuddite)

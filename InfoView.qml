@@ -14,6 +14,7 @@ Item {
   required property InfoSettings settings
   property bool interactive: true
   property bool aboutOpen: false
+  property bool settingsOpen: false
   // The background layer is created with WlrKeyboardFocus.None, so a text
   // field there can never receive keystrokes. The host sets this false and
   // the search box becomes a pointer to the overlay instead of a dead input.
@@ -1200,12 +1201,24 @@ Item {
           tone: view.desk.cyan
           MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.projectFilter = "" }
         }
+        Tag { visible: !!view.settings.settingsError; text: view.settings.settingsError; tone: view.desk.red }
         // Discoverability, faint and in the strip: the two keys everyone needs.
         // On the wallpaper SUPER+D opens the desktop view; in that view it closes it.
+        Tag {
+          text: "SETTINGS"
+          tone: view.settingsOpen ? view.desk.cyan : view.textFaint
+          MouseArea { anchors.fill: parent; enabled: view.interactive; cursorShape: Qt.PointingHandCursor; onClicked: view.settingsOpen = !view.settingsOpen }
+        }
         Tag {
           text: !view.privacyMode ? "PRIVACY" : (view.settings.privacyUnlockCount > 0 ? "PRIVACY ON · " + view.settings.privacyUnlockCount + "/" + view.settings.privacyUnlockNeeded : "PRIVACY ON")
           tone: view.privacyMode ? view.desk.yellow : view.textFaint
           MouseArea { anchors.fill: parent; enabled: view.interactive; cursorShape: Qt.PointingHandCursor; onClicked: view.settings.togglePrivacyMode() }
+        }
+        Tag {
+          text: view.settings.webEnabled ? (view.settings.webReady ? "WEB ON" : (view.settings.webStarting ? "WEB …" : "WEB FAILED")) : "WEB"
+          tone: view.settings.webReady ? view.desk.green : (view.settings.webFailed ? view.desk.yellow : view.textFaint)
+          // Off: open SETTINGS, where the setup gates live. On: turn WEB off.
+          MouseArea { anchors.fill: parent; enabled: view.interactive; cursorShape: Qt.PointingHandCursor; onClicked: { if (view.settings.webEnabled) view.settings.setWebEnabled(false); else view.settingsOpen = true } }
         }
         Tag { text: view.keyboardAvailable ? "SUPER+I HIDE DESK · SUPER+D / ESC CLOSE" : "SUPER+I HIDE DESK · SUPER+D SHOW OVER WINDOWS"; tone: view.textFaint }
         // Keyboard shortcuts only reach the overlay (the wallpaper layer has no keyboard focus).
@@ -2870,6 +2883,55 @@ Item {
           }
         }
         Item { Layout.row: 99; Layout.column: 0; Layout.fillHeight: true }
+        }
+      }
+    }
+  }
+
+  MouseArea {
+    z: 100
+    anchors.fill: parent
+    visible: view.settingsOpen && view.interactive
+    acceptedButtons: Qt.AllButtons
+    onClicked: view.settingsOpen = false
+  }
+  Rectangle {
+    id: settingsPanel
+    z: 101
+    anchors.centerIn: parent
+    visible: view.settingsOpen && view.interactive
+    // Three columns wide, so the drawer fits 1600x1000 without scrolling. The
+    // Flickable stays only as a safety net for smaller screens.
+    width: Math.min(parent.width - view.gap * 4, Math.round(1480 * Style.fontScale))
+    height: Math.min(parent.height - view.gap * 4, settingsFlick.contentHeight + settingsHeader.implicitHeight + Style.spacing.md + view.pad * 2)
+    radius: view.radius
+    color: Util.alpha(view.desk.themeBackground, 0.97)
+    border.color: Util.alpha(view.desk.themeForeground, 0.8)
+    border.width: 1
+    MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; onClicked: function(mouse) { mouse.accepted = true } }
+    ColumnLayout {
+      anchors { fill: parent; margins: view.pad }
+      spacing: Style.spacing.md
+      RowLayout {
+        id: settingsHeader
+        Layout.fillWidth: true
+        PlainText { text: "SETTINGS"; color: view.desk.themeForeground; font.family: view.mono; font.pixelSize: Style.font.subtitle; font.bold: true }
+        Item { Layout.fillWidth: true }
+        Tag { text: "CLOSE"; tone: view.desk.themeForeground; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.settingsOpen = false } }
+      }
+      Flickable {
+        id: settingsFlick
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        contentWidth: width
+        contentHeight: settingsBody.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        SettingsBody {
+          id: settingsBody
+          width: settingsFlick.width
+          settings: view.settings
+          desk: view.desk
         }
       }
     }

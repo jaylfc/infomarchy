@@ -436,7 +436,7 @@ describe("the desk can be pinned to one workspace", () => {
     // Both halves of applyConfig: a missing or malformed key must land on 0,
     // never on some workspace the user never asked for.
     expect(settings).toContain("deskWorkspace = parsed && Number.isInteger(parsed.deskWorkspace) ? Math.max(0, Math.min(maxWorkspace, parsed.deskWorkspace)) : 0");
-    expect(settings).toContain("deskWorkspace: deskWorkspace,");
+    expect(settings).toContain("persist({ deskWorkspace: deskWorkspace })");
   });
 
   test("an out-of-range workspace is refused, not clamped", () => {
@@ -534,7 +534,7 @@ describe("an idle session drops off the desk and comes back on its own", () => {
 
   test("hiding is on by default, persisted, and reversible without a rebuild", () => {
     expect(settings).toContain("property bool hideQuietSessions: true");
-    expect(settings).toContain("hideQuietSessions: hideQuietSessions,");
+    expect(settings).toContain("persist({ hideQuietSessions: hideQuietSessions })");
     expect(settings).toContain("function setHideQuietSessions(enabled)");
     // An older config file predates the key; absent must not read as off.
     expect(settings).toContain("hideQuietSessions = !parsed || parsed.hideQuietSessions !== false");
@@ -1008,8 +1008,8 @@ describe("quiet sessions group into one card per provider", () => {
     expect(enabled({ "grok-bot": "yes" })("grok-bot")).toBe(true);
     expect(settings).toContain('readonly property var sessionGroupDefaults: ({ "grok-bot": true })');
     expect(settings).toContain("property int sessionQuietMinutes: 60");
-    expect(settings).toContain("sessionGroups: sessionGroups,");
-    expect(settings).toContain("sessionQuietMinutes: sessionQuietMinutes,");
+    expect(settings).toContain('persistEntry("sessionGroups", key, !!enabled)');
+    expect(settings).toContain("persist({ sessionQuietMinutes: sessionQuietMinutes })");
     expect(settings).toContain("function toggleSessionGroup(provider)");
   });
 
@@ -1017,7 +1017,7 @@ describe("quiet sessions group into one card per provider", () => {
     const source = settings.match(/function setSessionGroup\([\s\S]*?\n  \}/)?.[0];
     expect(source).toBeTruthy();
     const state = { sessionGroups: {} as Record<string, boolean>, persists: 0 };
-    const set = Function("state", "persist", `
+    const set = Function("state", "persistEntry", `
       var sessionGroups = state.sessionGroups
       ${source}
       return function(provider, enabled) {

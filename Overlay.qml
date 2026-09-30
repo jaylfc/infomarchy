@@ -132,7 +132,7 @@ Scope {
         focus: root.opened
         // Esc closes ABOUT first, then the overlay — one panel deep, so a
         // reader who opened it does not lose the whole desk on the way out.
-        Keys.onEscapePressed: { if (infoView.aboutOpen) infoView.aboutOpen = false; else root.close() }
+        Keys.onEscapePressed: { if (infoView.settingsOpen) infoView.settingsOpen = false; else if (infoView.aboutOpen) infoView.aboutOpen = false; else root.close() }
         Keys.onPressed: function(event) {
           if ((event.modifiers & Qt.MetaModifier) && event.key === Qt.Key_I) {
             if (event.modifiers & Qt.ShiftModifier) {

@@ -3,7 +3,8 @@ import Quickshell
 import Quickshell.Io
 
 // Shared-on-disk dashboard preferences. Wallpaper and overlay each instantiate
-// this lightweight object; FileView propagation keeps both views in sync.
+// this lightweight object; field patches merge under a shared process lock.
+// FileView propagation keeps readers in sync; it never writes stale snapshots.
 Item {
   id: root
 
@@ -88,6 +89,19 @@ Item {
   readonly property int privacyUnlockNeeded: 3
   readonly property int privacyUnlockMs: 2000
   property var rightOrder: ["usage", "localAi", "fleet", "machine", "media", "containers"]
+  property bool webEnabled: false
+  property bool webReady: false
+  property bool webStarting: false
+  readonly property bool webFailed: webEnabled && !webReady && !webStarting
+  // "" until the operator picks one. Only "tailscale" and "manual" exist:
+  // LAN HTTP was removed, and a saved LAN or unknown mode loads as unset.
+  property string webAccessMode: ""
+  readonly property bool webModeUnset: webAccessMode !== "tailscale" && webAccessMode !== "manual"
+  property var manualHttps: ({})
+  property string webStatusText: ""
+  property var webSections: ({})
+  property var webNarrowOrder: ["sessions", "changes", "needs", "projects", "activity", "github", "recent", "usage", "localAi", "machine"]
+  readonly property string webServerPath: Qt.resolvedUrl("web-server.ts").toString().replace(/^file:\/\//, "")
   property var opsOrder: ["changes", "needs", "projects"]
 
   function normalizedRightOrder(value) {
@@ -102,8 +116,15 @@ Item {
     for (var j = 0; j < allowed.length; j++) if (result.indexOf(allowed[j]) < 0) result.push(allowed[j])
     return result
   }
+  function normalizedWebNarrowOrder(value) {
+    var allowed = ["sessions", "changes", "needs", "projects", "activity", "github", "recent", "usage", "localAi", "machine"], result = []
+    if (Array.isArray(value)) for (var i = 0; i < value.length; i++) if (allowed.indexOf(value[i]) >= 0 && result.indexOf(value[i]) < 0) result.push(value[i])
+    for (var j = 0; j < allowed.length; j++) if (result.indexOf(allowed[j]) < 0) result.push(allowed[j])
+    return result
+  }
 
   function applyConfig(raw) {
+    if (settingsWriting) return
     try {
       var parsed = JSON.parse(String(raw || "{}"))
       sections = parsed && parsed.sections && typeof parsed.sections === "object" ? parsed.sections : ({})
@@ -126,8 +147,25 @@ Item {
       dashboardVisible = parsed && typeof parsed.dashboardVisible === "boolean" ? parsed.dashboardVisible : true
       privacyMode = !!(parsed && parsed.privacyMode === true)
       privacyUnlockCount = 0
+      // LAN HTTP was removed. A saved "lan", a missing mode (which pre-release builds
+      // read as LAN) or any unknown value loads as unset, and WEB stays off
+      // until the operator chooses a mode. Nothing ever switches to another mode.
+      var savedMode = parsed && typeof parsed.webAccessMode === "string" ? parsed.webAccessMode : ""
+      webAccessMode = savedMode === "tailscale" || savedMode === "manual" ? savedMode : ""
+      manualHttps = parsed && parsed.manualHttps && typeof parsed.manualHttps === "object" ? parsed.manualHttps : ({})
+      webEnabled = !webModeUnset && !!(parsed && parsed.webEnabled === true)
+      if (webModeUnset && parsed && parsed.webEnabled === true) {
+        webStatusText = savedMode === "" || savedMode === "lan"
+          ? "LAN HTTP was removed. Choose Private HTTPS or Manual HTTPS, then turn WEB on."
+          : "Unknown saved access mode. Choose Private HTTPS or Manual HTTPS, then turn WEB on."
+        stopStaleWeb()
+      }
+      webSections = parsed && parsed.webSections && typeof parsed.webSections === "object" ? parsed.webSections : ({})
+      if (webEnabled) Qt.callLater(refreshWebStatus)
+      else { webReady = false; webStarting = false }
       rightOrder = normalizedRightOrder(parsed ? parsed.rightOrder : null)
       opsOrder = normalizedOpsOrder(parsed ? parsed.opsOrder : null)
+      webNarrowOrder = normalizedWebNarrowOrder(parsed ? parsed.webNarrowOrder : null)
     } catch (e) {
       sections = ({})
       attentionMuted = ({})
@@ -149,76 +187,99 @@ Item {
       dashboardVisible = true
       privacyMode = false
       privacyUnlockCount = 0
+      webAccessMode = ""
+      manualHttps = ({})
+      webEnabled = false
+      webReady = false
+      webSections = ({})
       rightOrder = normalizedRightOrder(null)
       opsOrder = normalizedOpsOrder(null)
+      webNarrowOrder = normalizedWebNarrowOrder(null)
     }
     ready = true
   }
-  // Both maps are keyed by values that age out of the snapshot (pid, prompt
-  // timestamp) and nothing ever removed them, so dashboard.json grew forever.
-  readonly property int maxPins: 200
-  function prunedMuted(muted, now) {
-    var next = {}, stamp = Number(now || Date.now())
-    for (var key in muted) {
-      var until = Number(muted[key])
-      // A lapsed snooze is already visible again; only keep live snoozes and
-      // explicit dismissals (-1).
-      if (until < 0 || until > stamp) next[key] = until
+  property var pendingPatch: ({})
+  property string settingsError: ""
+  property bool settingsWriteInFlight: false
+  readonly property bool settingsWriting: settingsWriteInFlight || Object.keys(pendingPatch).length > 0
+  function persist(patch) {
+    var next = JSON.parse(JSON.stringify(pendingPatch))
+    for (var key in patch) {
+      if (patch[key] && typeof patch[key] === "object" && !Array.isArray(patch[key])) {
+        var merged = next[key] || {}
+        for (var entry in patch[key]) merged[entry] = patch[key][entry]
+        next[key] = merged
+      } else next[key] = patch[key]
     }
-    return next
+    pendingPatch = next
+    startSettingsWrite()
   }
-  function prunedPins(pins) {
-    var keys = []
-    for (var key in pins) if (pins[key] === true) keys.push(key)
-    if (keys.length <= maxPins) {
-      var same = {}
-      for (var k = 0; k < keys.length; k++) same[keys[k]] = true
-      return same
+  function persistEntry(field, key, value) {
+    var entries = {}, patch = {}
+    entries[key] = value
+    patch[field] = entries
+    persist(patch)
+  }
+  function startSettingsWrite() {
+    if (settingsWriteInFlight || !Object.keys(pendingPatch).length) return
+    settingsWriteInFlight = true
+    settingsWriter.frame = JSON.stringify(pendingPatch)
+    pendingPatch = ({})
+    settingsError = ""
+    settingsLaunchWatch.start()
+    settingsWriter.running = true
+  }
+  function settingsWriteFailed() {
+    settingsLaunchWatch.stop()
+    settingsWriteInFlight = false
+    pendingPatch = ({})
+    settingsWriter.frame = ""
+    settingsError = "Settings could not be saved. Check that Bun is installed, then try again."
+    Qt.callLater(function() { configFile.reload() })
+  }
+  // Quickshell Process exposes no launch-error signal. Failed launches do not
+  // emit exited; a bounded startup check restores the saved UI state instead.
+  Timer {
+    id: settingsLaunchWatch
+    interval: 1000
+    onTriggered: if (root.settingsWriteInFlight && !settingsWriter.running) root.settingsWriteFailed()
+  }
+  Process {
+    id: settingsWriter
+    property string frame: ""
+    command: ["bun", Qt.resolvedUrl("dashboard-state.ts").toString().replace(/^file:\/\//, "")]
+    stdinEnabled: true
+    onStarted: { settingsLaunchWatch.stop(); write(frame + "\n"); frame = "" }
+    onExited: function(code) {
+      settingsLaunchWatch.stop()
+      root.settingsWriteInFlight = false
+      if (code !== 0) { root.settingsWriteFailed(); return }
+      Qt.callLater(function() {
+        if (Object.keys(root.pendingPatch).length) root.startSettingsWrite()
+        else configFile.reload()
+      })
     }
-    // Key is provider:session:ts — keep the most recent pins.
-    keys.sort(function(a, b) { return Number(b.split(":").pop()) - Number(a.split(":").pop()) })
-    var next = {}
-    for (var i = 0; i < maxPins; i++) next[keys[i]] = true
-    return next
-  }
-  // seenChanges is keyed by repository path and was never pruned; every repo
-  // an agent ever touched stayed forever. Keep a bounded, most-recent set.
-  readonly property int maxSeenChanges: 64
-  function prunedSeen(seen) {
-    var keys = []
-    for (var key in seen) if (typeof seen[key] === "string" && seen[key]) keys.push(key)
-    var next = {}
-    // Insertion order is preserved by JS engines for string keys; newest last.
-    for (var i = Math.max(0, keys.length - maxSeenChanges); i < keys.length; i++) next[keys[i]] = seen[keys[i]]
-    return next
-  }
-  function persist() {
-    configFile.setText(JSON.stringify({
-      version: 4,
-      sections: sections,
-      attentionMuted: prunedMuted(attentionMuted),
-      pinnedPrompts: prunedPins(pinnedPrompts),
-      seenChanges: prunedSeen(seenChanges),
-      notificationEvents: notificationEvents,
-      notificationProviders: notificationProviders,
-      notificationsEnabled: notificationsEnabled,
-      sessionGroups: sessionGroups,
-      sessionQuietMinutes: sessionQuietMinutes,
-      hideQuietSessions: hideQuietSessions,
-      deskWorkspace: deskWorkspace,
-      videoAudio: videoAudio,
-      quietHoursEnabled: quietHoursEnabled,
-      quietStartHour: quietStartHour,
-      quietEndHour: quietEndHour,
-      selectedOllamaModel: selectedOllamaModel,
-      ollamaHost: ollamaHost,
-      dashboardVisible: dashboardVisible,
-      privacyMode: privacyMode,
-      rightOrder: normalizedRightOrder(rightOrder),
-      opsOrder: normalizedOpsOrder(opsOrder)
-    }, null, 2) + "\n")
   }
   function sectionEnabled(id) { return id === "apps" ? sections[id] === true : sections[id] !== false }
+  // Sections the browser page renders. Equal to WEB_SECTION_IDS in web-page.ts:
+  // MEDIA, APPS, CONTAINERS, FLEET and GITEA stay on the desk.
+  readonly property var webSectionIds: ["needs", "sessions", "activity", "github", "recent", "usage", "localAi", "machine", "changes", "projects"]
+  function webSectionEnabled(id) {
+    if (webSectionIds.indexOf(String(id)) < 0) return false
+    if (webSections[id] === false) return false
+    if (webSections[id] === true) return true
+    return sectionEnabled(id)
+  }
+  function setWebSection(id, enabled) {
+    if (webSectionIds.indexOf(String(id)) < 0) return false
+    var next = {}
+    for (var key in webSections) next[key] = webSections[key]
+    next[id] = !!enabled
+    webSections = next
+    persistEntry("webSections", id, !!enabled)
+    return true
+  }
+  function toggleWebSection(id) { return setWebSection(id, !webSectionEnabled(id)) }
   function adjacentEnabledIndex(order, from, direction, sectionState) {
     var step = Number(direction) < 0 ? -1 : Number(direction) > 0 ? 1 : 0
     if (!step || from < 0 || from >= order.length) return from
@@ -231,7 +292,7 @@ Item {
     for (var key in sections) next[key] = sections[key]
     next[id] = !!enabled
     sections = next
-    persist()
+    persistEntry("sections", id, !!enabled)
   }
   function toggleSection(id) { setSection(id, !sectionEnabled(id)) }
   function attentionVisible(key, now) {
@@ -243,7 +304,7 @@ Item {
     for (var name in attentionMuted) next[name] = attentionMuted[name]
     next[key] = Number(until)
     attentionMuted = next
-    persist()
+    persistEntry("attentionMuted", key, Number(until))
   }
   function snoozeAttention(key) { muteAttention(key, Date.now() + 10 * 60 * 1000) }
   function dismissAttention(key) { muteAttention(key, -1) }
@@ -258,7 +319,7 @@ Item {
     for (var name in notificationProviders) next[name] = notificationProviders[name]
     next[key] = !!enabled
     notificationProviders = next
-    persist()
+    persistEntry("notificationProviders", key, !!enabled)
     return true
   }
   function toggleNotificationProvider(provider) { return setNotificationProvider(provider, !notificationProviderEnabled(provider)) }
@@ -276,11 +337,11 @@ Item {
     for (var name in sessionGroups) next[name] = sessionGroups[name]
     next[key] = !!enabled
     sessionGroups = next
-    persist()
+    persistEntry("sessionGroups", key, !!enabled)
     return true
   }
   function toggleSessionGroup(provider) { return setSessionGroup(provider, !sessionGroupEnabled(provider)) }
-  function setHideQuietSessions(enabled) { hideQuietSessions = !!enabled; persist() }
+  function setHideQuietSessions(enabled) { hideQuietSessions = !!enabled; persist({ hideQuietSessions: hideQuietSessions }) }
   function toggleHideQuietSessions() { setHideQuietSessions(!hideQuietSessions) }
   // Hyprland's named/special workspaces carry negative ids (olrec is -1337);
   // those are not places the desk belongs, so only ordinary positive ids and
@@ -291,21 +352,21 @@ Item {
     var value = Number(workspace)
     if (!isFinite(value) || value < 0 || value > maxWorkspace || value !== Math.round(value)) return false
     deskWorkspace = value
-    persist()
+    persist({ deskWorkspace: deskWorkspace })
     return true
   }
   function setSessionQuietMinutes(minutes) {
     var value = Number(minutes)
     if (!isFinite(value) || value < 0 || value > 10080) return false
     sessionQuietMinutes = Math.round(value)
-    persist()
+    persist({ sessionQuietMinutes: sessionQuietMinutes })
     return true
   }
-  function setNotificationsEnabled(enabled) { notificationsEnabled = !!enabled; persist() }
+  function setNotificationsEnabled(enabled) { notificationsEnabled = !!enabled; persist({ notificationsEnabled: notificationsEnabled }) }
   function toggleNotificationsEnabled() { setNotificationsEnabled(!notificationsEnabled) }
-  function setVideoAudio(enabled) { videoAudio = !!enabled; persist() }
+  function setVideoAudio(enabled) { videoAudio = !!enabled; persist({ videoAudio: videoAudio }) }
   function toggleVideoAudio() { setVideoAudio(!videoAudio) }
-  function setQuietHoursEnabled(enabled) { quietHoursEnabled = !!enabled; persist() }
+  function setQuietHoursEnabled(enabled) { quietHoursEnabled = !!enabled; persist({ quietHoursEnabled: quietHoursEnabled }) }
   function toggleQuietHoursEnabled() { setQuietHoursEnabled(!quietHoursEnabled) }
   function inQuietHours(stamp) {
     if (!quietHoursEnabled) return false
@@ -334,7 +395,7 @@ Item {
     for (var i = 0; i < Math.min(255, recent.length); i++) next[recent[i].key] = recent[i].at
     next[eventKey] = now
     notificationEvents = next
-    persist()
+    persistEntry("notificationEvents", eventKey, now)
     return true
   }
   function normalizeOllamaHost(raw) {
@@ -354,7 +415,7 @@ Item {
     if (trimmed && !next) return false
     if (ollamaHost === next) return true
     ollamaHost = next
-    persist()
+    persist({ ollamaHost: ollamaHost })
     return true
   }
   function setSelectedOllamaModel(model) {
@@ -362,7 +423,7 @@ Item {
     if (name && !/^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,255}$/.test(name)) return false
     if (selectedOllamaModel === name) return true
     selectedOllamaModel = name
-    persist()
+    persist({ selectedOllamaModel: selectedOllamaModel })
     return true
   }
   function promptPinned(key) { return pinnedPrompts[key] === true }
@@ -371,23 +432,23 @@ Item {
     for (var name in pinnedPrompts) next[name] = pinnedPrompts[name]
     if (next[key] === true) delete next[key]; else next[key] = true
     pinnedPrompts = next
-    persist()
+    persistEntry("pinnedPrompts", key, next[key] === true ? true : null)
   }
   function changeSeen(key, fingerprint) { return !!fingerprint && seenChanges[key] === fingerprint }
   function markChangeSeen(key, fingerprint) {
     if (!key || !fingerprint || changeSeen(key, fingerprint)) return false
     var next = {}
     // Copy everything EXCEPT this key, then append it, so the just-updated
-    // repository is newest in insertion order and survives prunedSeen().
+    // repository is newest in insertion order and survives the bounded seen-change map.
     for (var name in seenChanges) if (name !== key) next[name] = seenChanges[name]
     next[key] = fingerprint
     seenChanges = next
-    persist()
+    persistEntry("seenChanges", key, fingerprint)
     return true
   }
   function setDashboardVisible(visible) {
     dashboardVisible = !!visible
-    persist()
+    persist({ dashboardVisible: dashboardVisible })
   }
   function toggleDashboardVisible() { setDashboardVisible(!dashboardVisible) }
   function privacyUnlockStep(on, count, needed) {
@@ -406,7 +467,7 @@ Item {
     privacyUnlockCount = 0
     privacyUnlockReset.stop()
     privacyMode = !!enabled
-    persist()
+    persist({ privacyMode: privacyMode })
   }
   function togglePrivacyMode() {
     var step = privacyUnlockStep(privacyMode, privacyUnlockCount, privacyUnlockNeeded)
@@ -419,13 +480,125 @@ Item {
     if (privacyUnlockCount > 0) privacyUnlockReset.restart()
     else privacyUnlockReset.stop()
   }
+  function setManualHttps(config) {
+    manualHttps = config
+    if (webAccessMode === "manual") { webEnabled = false; webReady = false; webStarting = false }
+    persist({ manualHttps: config })
+  }
+  function setWebAccessMode(mode) {
+    if ((mode !== "tailscale" && mode !== "manual") || mode === webAccessMode) return
+    webEnabled = false
+    webReady = false
+    webStarting = false
+    webAccessMode = mode
+    webStatusText = ""
+    persist({ webAccessMode: webAccessMode, webEnabled: false })
+  }
+  function setWebEnabled(enabled) {
+    if (enabled && webModeUnset) return
+    webStarting = !!enabled
+    webStatusText = ""
+    webEnabled = !!enabled
+    if (!webEnabled) webReady = false
+    else Qt.callLater(refreshWebStatus)
+    persist({ webEnabled: webEnabled })
+  }
+  function toggleWebEnabled() { setWebEnabled(!webEnabled) }
+  // Enabling from outside the drawer (IPC) passes the same gate the drawer
+  // does, and fails closed: a chosen mode, no pending save, and a passing
+  // prerequisite check (Tailscale status, or the saved Manual certificate).
+  // Turning WEB off never waits for a check.
+  function enableWebChecked() {
+    if (webEnabled || webPrereq.running) return
+    if (webModeUnset) { webStatusText = "Choose an access mode in SETTINGS before turning WEB on."; return }
+    if (settingsWriting) { webStatusText = "Settings are still saving. Try again."; return }
+    webPrereq.mode = webAccessMode
+    webPrereq.output = ""
+    webPrereq.running = true
+  }
+  function toggleWebChecked() { if (webEnabled) setWebEnabled(false); else enableWebChecked() }
+  Process {
+    id: webPrereq
+    property string mode: ""
+    property string output: ""
+    command: ["bun", Qt.resolvedUrl(mode === "manual" ? "web-manual.ts" : "web-tailscale.ts").toString().replace(/^file:\/\//, "")]
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (webPrereq.output.length + chunk.length > 2048) { webPrereq.running = false; return }
+        webPrereq.output += chunk
+      }
+    }
+    onExited: {
+      var result = null
+      try { result = JSON.parse(output) } catch (e) {}
+      output = ""
+      // The mode may have changed while the check ran. Only a pass for the
+      // mode still selected enables WEB.
+      if (result && result.ok === true && mode === root.webAccessMode && !root.webModeUnset && !root.settingsWriting) root.setWebEnabled(true)
+      else root.webStatusText = String(result && result.message ? result.message : "Prerequisite check failed. Open SETTINGS to finish setup.").replace(/[<>\u0000-\u001f]/g, " ").slice(0, 400)
+    }
+  }
+  // One-shot cleanup for a listener saved on by a build that had LAN HTTP:
+  // save WEB off, and mark web.json not listening so the collector stops
+  // refreshing web-snapshot.json. Idempotent, so both desk instances may run it.
+  function stopStaleWeb() {
+    persist({ webEnabled: false })
+    if (!staleWebDisable.running) staleWebDisable.running = true
+  }
+  Process {
+    id: staleWebDisable
+    command: ["bun", root.webServerPath, "disable"]
+  }
+  function retryWebSetup() {
+    if (!webFailed || webRetryProc.running) return
+    webStatusReader.running = false
+    webStarting = true
+    webStatusText = "Retrying setup…"
+    webRetryProc.running = true
+  }
+  Process {
+    id: webRetryProc
+    command: ["omarchy-shell", "infomarchy", "retryWeb"]
+    onExited: function(code) { if (code !== 0) { root.webStarting = false; root.webStatusText = "Could not retry setup. Check that the shell is running." } }
+  }
+  function refreshWebStatus() {
+    if (!webEnabled) { webReady = false; return }
+    webStatusReader.running = false
+    webStatusReader.running = true
+  }
+  Process {
+    id: webStatusReader
+    command: ["bun", root.webServerPath, "status"]
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function(line) {
+        var raw = String(line || "")
+        if (raw.length > 1024) return
+        try {
+          var parsed = JSON.parse(raw)
+          if (parsed && parsed.ok === true) {
+            root.webReady = parsed.ready === true
+            root.webStarting = parsed.running === true && !root.webReady
+            root.webStatusText = String(parsed.message || "").slice(0, 400)
+          }
+        } catch (e) {}
+      }
+    }
+  }
+  Timer {
+    interval: 3000
+    running: root.ready && root.webEnabled
+    repeat: true
+    onTriggered: root.refreshWebStatus()
+  }
   function rightIndex(id) { var index = rightOrder.indexOf(id); return index < 0 ? 99 : index }
   function moveRight(id, direction) {
     var next = normalizedRightOrder(rightOrder), from = next.indexOf(id), to = adjacentEnabledIndex(next, from, direction, sections)
     if (from < 0 || from === to) return false
     next.splice(from, 1); next.splice(to, 0, id)
     rightOrder = next
-    persist()
+    persist({ rightOrder: rightOrder })
     return true
   }
   function opsIndex(id) { var index = opsOrder.indexOf(id); return index < 0 ? 99 : index }
@@ -447,7 +620,7 @@ Item {
     if (from < 0 || from === to) return false
     next.splice(from, 1); next.splice(to, 0, id)
     opsOrder = next
-    persist()
+    persist({ opsOrder: opsOrder })
     return true
   }
 
@@ -455,7 +628,6 @@ Item {
     id: configFile
     path: root.configPath
     watchChanges: true
-    atomicWrites: true
     printErrors: false
     onLoaded: root.applyConfig(text())
     onLoadFailed: root.applyConfig("{}")
