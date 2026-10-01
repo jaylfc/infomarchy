@@ -60,7 +60,10 @@ const CEILINGS: Record<string, number> = {
   // false-positive shape counted above.
   // +3 (#25): the SETTINGS drawer panel reads Style.spacing.md (twice) and
   // Style.font.subtitle, dynamic Style properties qmllint sees as QObject.
-  "InfoView.qml": 602,
+  // +7 (#13): the REMOTE card's delegate reads view.desk, view.settings and
+  // Style through the outer scope, the same unqualified false positive every
+  // other card in this file contributes.
+  "InfoView.qml": 609,
   "Overlay.qml": 29,
   "WaveWallpaper.qml": 0,
   // Settings drawer (#25): dynamic Style properties qmllint sees as QObject,

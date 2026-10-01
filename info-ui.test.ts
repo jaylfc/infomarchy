@@ -394,8 +394,8 @@ describe("right column fits a 1080p desk", () => {
 describe("containers card", () => {
   test("registers a reorderable lower-right module with per-row on/off toggles", () => {
     expect(settings).toContain('{ id: "containers", label: "CONTAINERS" }');
-    expect(settings).toContain('property var rightOrder: ["usage", "localAi", "fleet", "machine", "media", "containers"]');
-    expect(settings).toContain('var allowed = ["usage", "localAi", "fleet", "machine", "media", "containers"]');
+    expect(settings).toContain('property var rightOrder: ["usage", "localAi", "remoteRoster", "fleet", "machine", "media", "containers"]');
+    expect(settings).toContain('var allowed = ["usage", "localAi", "remoteRoster", "fleet", "machine", "media", "containers"]');
     expect(view).toContain('title: "CONTAINERS"');
     expect(view).toContain('moveId: "containers"');
     expect(view).toContain("component PowerToggle: Item");
@@ -790,7 +790,7 @@ test("persisted Ollama origins reject credentials and request paths", () => {
 describe("media controls card", () => {
   test("registers a reorderable lower-right MPRIS card with prev/play/next and a title line", () => {
     expect(settings).toContain('{ id: "media", label: "MEDIA" }');
-    expect(settings).toContain('property var rightOrder: ["usage", "localAi", "fleet", "machine", "media", "containers"]');
+    expect(settings).toContain('property var rightOrder: ["usage", "localAi", "remoteRoster", "fleet", "machine", "media", "containers"]');
     expect(view).toContain('title: "MEDIA CONTROLS"');
     expect(view).toContain('moveId: "media"');
     expect(view).toContain("import Quickshell.Services.Mpris");
@@ -1214,5 +1214,78 @@ describe("collector command", () => {
     expect(service).toContain("usageVisible: " + bound);
     // A closed overlay shows no card, so it never counts as visible.
     expect(overlay).toContain("usageVisible: root.opened && " + bound);
+  });
+});
+
+describe("external roster presentation", () => {
+  const start = view.indexOf("id: remoteRosterCard");
+  const card = view.slice(start, view.indexOf("// ---- machine corner", start));
+  test("migrates persisted order next to LOCAL AI without adding an eleventh module", () => {
+    const normalize = Function(`return (${settings.match(/function normalizedRightOrder\([\s\S]*?\n  \}/)![0]})`)();
+    expect(normalize(["usage", "localAi", "machine"])).toEqual(["usage", "localAi", "remoteRoster", "machine", "fleet", "media", "containers"]);
+    expect(normalize(null)).toEqual(["usage", "localAi", "remoteRoster", "fleet", "machine", "media", "containers"]);
+    expect(normalize(["machine", "usage", "localAi"])).toEqual(["machine", "usage", "localAi", "remoteRoster", "fleet", "media", "containers"]);
+    expect(normalize(["remoteRoster", "machine", "localAi", "usage", "remoteRoster"])).toEqual(["remoteRoster", "machine", "localAi", "usage", "fleet", "media", "containers"]);
+    expect(settings.slice(settings.indexOf("readonly property var definitions"), settings.indexOf("property var sections"))).not.toContain("remoteRoster");
+    expect(view).toContain('|| !!view.ai.remoteRoster');
+    expect(card).toContain('rightIndex("remoteRoster")');
+    expect(card).toContain('title: "REMOTE"');
+    expect(card).not.toMatch(/moveId:|draggable:|focusSession|inspect|resume|STOP|END/);
+    expect(model).toContain('case "remote": return "Remote"');
+  });
+  test("the card's one action is a workspace, opt-in, and inert without one", () => {
+    // Exactly one MouseArea: no per-row actions, no drag target, nothing that
+    // reaches an agent — a remote agent has no window on this machine.
+    expect(card.match(/MouseArea/g)).toHaveLength(1);
+    expect(card).toContain("enabled: view.interactive && !!remoteRosterCard.roster.workspace");
+    expect(card).toContain("onClicked: view.desk.focusWorkspace(remoteRosterCard.roster.workspace)");
+    expect(card).toContain('(roster.workspace ? " · click to open" : "")');
+    const guard = model.match(/function focusWorkspace\(workspace\)[\s\S]*?\n  \}/)![0];
+    expect(guard).toContain("if (!/^[1-9][0-9]?$/.test(ws)) return");
+    expect(guard).toContain("hl.dsp.focus({ workspace = ");
+    expect(guard).toContain('"hyprctl", "dispatch", "workspace", ws');
+    expect(guard).not.toMatch(/exec_cmd|killactive|exit|movetoworkspace/);
+  });
+  test("two-row overflow includes emitted rows that do not fit", () => {
+    const limit = card.match(/rowLimit: (.+)/)![1];
+    const remaining = card.match(/remaining: (.+)/)![1];
+    const rowLimit = Function("view", "Style", `return ${limit}`)({ height: 1080 }, { fontScale: 1 });
+    const roster = { needsYou: [{}, {}, {}, {}], overflow: 2 };
+    expect(rowLimit).toBe(2);
+    expect(Function("roster", "rows", `return ${remaining}`)(roster, roster.needsYou.slice(0, rowLimit))).toBe(4);
+    expect(Function("view", "Style", `return ${limit}`)({ height: 1440 }, { fontScale: 1 })).toBe(4);
+    expect(card).toContain("delegate: PlainText");
+  });
+  test("1080p differential: local Flow geometry and RECENT layout bindings ignore roster", () => {
+    // Source/binding regression, not a rendered-height measurement. Nine local
+    // sessions intentionally exercise wrapping; roster presence must not alter it.
+    const left = view.slice(view.indexOf("// LEFT COLUMN:"), view.indexOf("// RIGHT COLUMN:"));
+    expect(left).not.toContain("remoteRoster");
+    const expr = (pattern: RegExp) => view.match(pattern)![1];
+    const evaluate = (source: string, fixture: any, extra = {}) => Function("view", "Style", ...Object.keys(extra), `return ${source}`)(fixture, { fontScale: 1 }, ...Object.values(extra));
+    const fixture = { width: 1920, height: 1080, gap: 12, sessions: Array.from({ length: 9 }, (_, id) => ({ id })), ai: {}, sectionEnabled: () => true };
+    function layout(ai: any) {
+      const v = { ...fixture, ai, visibleSessions: fixture.sessions };
+      const rightColumnWidth = evaluate(expr(/rightColumnWidth: (.+)/), v, { width: v.width });
+      // dense and targetColumns became multi-line bindings after this PR was
+      // written; read both from source so the differential still compares what
+      // the desk actually computes.
+      const dense = evaluate(expr(/readonly property bool dense: (.+)/), v);
+      const targetColumns = evaluate(view.match(/readonly property int targetColumns: ([\s\S]*?)\n            \/\//)![1], v, { dense });
+      const minimumCardWidth = evaluate(expr(/minimumCardWidth: (.+)/), v, { dense });
+      const width = evaluate(expr(/Layout.maximumWidth: (view.width - view.rightColumnWidth[^\n]+)/), { ...v, rightColumnWidth });
+      const fittedCardWidth = evaluate(expr(/fittedCardWidth: (.+)/), v, { width, spacing: 12, targetColumns });
+      const recent = left.slice(left.indexOf("// ---- recent prompts"));
+      return { targetColumns, minimumCardWidth, fittedCardWidth,
+        rows: Math.ceil(v.sessions.length / targetColumns),
+        recentEnabled: evaluate(recent.match(/visible: (.+)/)![1], v),
+        recentMinimumHeight: evaluate(recent.match(/Layout.minimumHeight: (.+)/)![1], v) };
+    }
+    const absent = layout({ sessions: fixture.sessions });
+    const populated = layout({ sessions: fixture.sessions, remoteRoster: { counts: { busy: 100 }, needsYou: [{}, {}, {}, {}], overflow: 96 } });
+    expect(populated).toEqual(absent);
+    expect(absent).toMatchObject({ targetColumns: 6, rows: 2, recentEnabled: true, recentMinimumHeight: 150 });
+    // RECENT's enabled/minimum-height bindings are what this helper can assert;
+    // actual on-desk visibility still needs a renderer with real font metrics.
   });
 });

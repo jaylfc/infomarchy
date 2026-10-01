@@ -88,7 +88,7 @@ Item {
   property int privacyUnlockCount: 0
   readonly property int privacyUnlockNeeded: 3
   readonly property int privacyUnlockMs: 2000
-  property var rightOrder: ["usage", "localAi", "fleet", "machine", "media", "containers"]
+  property var rightOrder: ["usage", "localAi", "remoteRoster", "fleet", "machine", "media", "containers"]
   property bool webEnabled: false
   property bool webReady: false
   property bool webStarting: false
@@ -105,9 +105,11 @@ Item {
   property var opsOrder: ["changes", "needs", "projects"]
 
   function normalizedRightOrder(value) {
-    var allowed = ["usage", "localAi", "fleet", "machine", "media", "containers"], result = []
+    var allowed = ["usage", "localAi", "remoteRoster", "fleet", "machine", "media", "containers"], result = []
     if (Array.isArray(value)) for (var i = 0; i < value.length; i++) if (allowed.indexOf(value[i]) >= 0 && result.indexOf(value[i]) < 0) result.push(value[i])
-    for (var j = 0; j < allowed.length; j++) if (result.indexOf(allowed[j]) < 0) result.push(allowed[j])
+    // Preserve existing custom order; migrate the new card next to LOCAL AI.
+    for (var j = 0; j < allowed.length; j++) if (allowed[j] !== "remoteRoster" && result.indexOf(allowed[j]) < 0) result.push(allowed[j])
+    if (result.indexOf("remoteRoster") < 0) result.splice(result.indexOf("localAi") + 1, 0, "remoteRoster")
     return result
   }
   function normalizedOpsOrder(value) {
@@ -283,8 +285,9 @@ Item {
   function adjacentEnabledIndex(order, from, direction, sectionState) {
     var step = Number(direction) < 0 ? -1 : Number(direction) > 0 ? 1 : 0
     if (!step || from < 0 || from >= order.length) return from
+    // REMOTE has no section toggle or drag interaction, so skip its slot.
     for (var index = from + step; index >= 0 && index < order.length; index += step)
-      if (!sectionState || sectionState[order[index]] !== false) return index
+      if (order[index] !== "remoteRoster" && (!sectionState || sectionState[order[index]] !== false)) return index
     return from
   }
   function setSection(id, enabled) {

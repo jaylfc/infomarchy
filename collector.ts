@@ -21,6 +21,7 @@ import { deriveNotificationEvents } from "./notification-events";
 import { containerEngine, containerListArgv, parseContainerList } from "./container-control";
 import { fleetEnabled, fleetHostsFromEnv, fleetRefreshDue, fleetSnapshot, parseFleetStoreText, refreshFleet } from "./fleet-remote";
 import { hermesUsageRefreshDue, hermesUsageSummary, parseHermesUsageStoreText, refreshHermesUsage } from "./hermes-usage";
+import { validOrcaHandle } from "./orca-focus";
 import { fleetSessionsEnabled, fleetSessionsPayload, fleetSessionsRefreshDue, mergeFleetSessions, parseFleetSessionStoreText, refreshFleetSessions } from "./fleet-sessions";
 
 const HOME = process.env.HOME || "/root";
@@ -820,7 +821,7 @@ function contextId(value: unknown): string {
   return /^[A-Za-z0-9%][A-Za-z0-9_.:%-]{0,127}$/.test(id) ? id : "";
 }
 export type SessionHost = {
-  kind: "herdr" | "boomux" | "tmux" | "background";
+  kind: "orca" | "herdr" | "boomux" | "tmux" | "background";
   label: string;
   workspace?: string;
   workspaceId?: string;
@@ -842,6 +843,11 @@ export type SessionHost = {
   // Herdr: the session socket the agent's environment points at, so a click
   // can address the same server the agent lives in.
   socket?: string;
+  // Orca: the terminal tab this agent types into. `orca terminal switch`
+  // takes it directly.
+  handle?: string;
+  // Orca: the worktree path the tab was opened in, for the card's label only.
+  worktree?: string;
 };
 export function herdrSocketFromEnvironment(environ = ""): string {
   const socket = String(envValue(environ, "HERDR_SOCKET_PATH") || "");
@@ -859,16 +865,35 @@ export function backgroundDaemonKind(cmd: string[]): string {
   if (/(^|\/)claude bg-pty-host$/.test(head) || (/(^|\/)claude$/.test(head) && cmd[1] === "bg-pty-host")) return "claude";
   return "";
 }
+export function orcaHandleFromEnvironment(environ = ""): string {
+  return validOrcaHandle(envValue(environ, "ORCA_TERMINAL_HANDLE"));
+}
 export function sessionHostsFromEnvironment(environ = ""): SessionHost[] {
   const hosts: SessionHost[] = [];
+  // Orca is resolved FIRST and suppresses the multiplexer variables below,
+  // because an Orca-hosted agent inherits the terminal Orca itself was
+  // launched from. Measured on this desk 2026-09-30: Orca was started from a
+  // Herdr pane, so six unrelated Orca agents all carried HERDR_ENV=1 and the
+  // identical HERDR_PANE_ID=w30:p1, and every one of their cards jumped to
+  // that single pane instead of the agent. The inherited ids are real and
+  // live, which is exactly why trusting them fails silently.
+  const orcaHandle = orcaHandleFromEnvironment(environ);
+  if (orcaHandle) {
+    // ORCA_WORKTREE_ID is "<uuid>::<path>"; only the path is worth showing.
+    const worktree = contextValue(String(envValue(environ, "ORCA_WORKTREE_ID") || "").split("::").pop() || "", 128);
+    const name = worktree ? worktree.split("/").filter(Boolean).pop() || "" : "";
+    hosts.push({ kind: "orca", label: "Orca" + (name ? " / " + name : ""), handle: orcaHandle, worktree });
+  }
+  // Only the inherited-terminal kinds are suppressed. A tmux session started
+  // INSIDE an Orca tab is the agent's own and still addresses its real pane.
   const herdrPane = contextId(envValue(environ, "HERDR_PANE_ID"));
   const herdrWorkspace = contextId(envValue(environ, "HERDR_WORKSPACE_ID"));
   const herdrTab = contextId(envValue(environ, "HERDR_TAB_ID"));
-  if (envValue(environ, "HERDR_ENV") === "1" && (herdrPane || herdrWorkspace || herdrTab)) {
+  if (!orcaHandle && envValue(environ, "HERDR_ENV") === "1" && (herdrPane || herdrWorkspace || herdrTab)) {
     const parts = [herdrWorkspace, herdrTab, herdrPane].filter(Boolean);
     hosts.push({ kind: "herdr", label: "Herdr " + parts.join(" / "), workspaceId: herdrWorkspace, tabId: herdrTab, paneId: herdrPane, socket: herdrSocketFromEnvironment(environ) });
   }
-  const boomuxShellId = contextId(envValue(environ, "BOOMUX_SHELL_ID"));
+  const boomuxShellId = orcaHandle ? "" : contextId(envValue(environ, "BOOMUX_SHELL_ID"));
   if (boomuxShellId) {
     const workspace = contextValue(envValue(environ, "BOOMUX_WORKSPACE"), 64);
     const shell = contextValue(envValue(environ, "BOOMUX_SHELL_NAME"), 64);
@@ -1591,6 +1616,17 @@ async function liveSessions(pids: number[]) {
     for (const ancestor of processAncestors(p.pid).slice(1)) {
       const daemon = backgroundDaemonKind(cmdByPid.get(ancestor) || []);
       if (daemon) { hosts.push({ kind: "background", label: "background · " + daemon + " daemon" }); break; }
+    }
+    // A daemon-hosted session has no terminal: it was reparented to systemd
+    // and the multiplexer ids still in its environment belong to whoever
+    // launched it, which is usually the interactive agent in the same repo.
+    // Measured 2026-09-30: a background session and the interactive one beside
+    // it both claimed Herdr pane w3T:p1, so the desk showed what looked like a
+    // duplicate card whose click jumped to the OTHER session. Keep the
+    // background host, which knows how to attach, and drop the borrowed ones.
+    if (hosts.some(host => host.kind === "background")) {
+      for (let i = hosts.length - 1; i >= 0; i--)
+        if (hosts[i].kind === "orca" || hosts[i].kind === "herdr" || hosts[i].kind === "boomux") hosts.splice(i, 1);
     }
     const tmuxHost = hosts.find(host => host.kind === "tmux");
     const tmuxSocket = tmuxSocketFromEnvironment(environ);
@@ -3438,13 +3474,77 @@ function agentsUsage() {
   return out;
 }
 
+// External roster data is presentation-only: never merge it into local sessions.
+const MAX_REMOTE_ROSTER_BYTES = 256 * 1024;
+type RemoteAttention = "blocked" | "waiting" | "done";
+export type RemoteRoster = {
+  state: "ok" | "stale" | "unavailable";
+  fetchedAt: number;
+  counts: { busy: number; idle: number; offline: number };
+  needsYou: { id: string; name: string; lastLine: string; attention: RemoteAttention }[];
+  overflow: number;
+  // Where this operator's own view of those agents lives, if they have one.
+  workspace?: number;
+};
+function unavailableRoster(): RemoteRoster {
+  return { state: "unavailable", fetchedAt: 0, counts: { busy: 0, idle: 0, offline: 0 }, needsYou: [], overflow: 0 };
+}
+// A remote agent has no window on this machine, so there is nothing here for a
+// click to focus — unless the operator has built their own view of those agents
+// and says which workspace it is on. Unset, which is the default, keeps the card
+// inert; the desk never guesses, and never learns what that view contains.
+export function remoteWorkspace(value = process.env.INFOMARCHY_REMOTE_WORKSPACE): number | undefined {
+  return typeof value === "string" && /^[1-9][0-9]?$/.test(value) ? Number(value) : undefined;
+}
+export function parseRemoteRoster(text: string, mtime: number, stamp = Date.now()): RemoteRoster {
+  if (Buffer.byteLength(text, "utf8") > MAX_REMOTE_ROSTER_BYTES) return unavailableRoster();
+  const doc = parseJsonBounded(text);
+  if (!doc || doc.v !== 1 || !Array.isArray(doc.agents)) return unavailableRoster();
+  const parsedTime = typeof doc.fetchedAt === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i.test(doc.fetchedAt)
+    ? Date.parse(doc.fetchedAt) : NaN;
+  const fetchedAt = Number.isFinite(parsedTime) && parsedTime >= 946_684_800_000 && parsedTime <= stamp + 60_000 ? parsedTime : mtime;
+  const result: RemoteRoster = { ...unavailableRoster(), state: stamp - fetchedAt > 300_000 ? "stale" : "ok", fetchedAt };
+  const seen = new Set<string>();
+  const rank = { blocked: 0, waiting: 1, done: 2 };
+  for (const row of doc.agents.slice(0, 100)) {
+    if (!row || typeof row.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(row.id) || seen.has(row.id)) continue;
+    if (row.status !== "busy" && row.status !== "idle" && row.status !== "offline") continue;
+    // First ingested row owns the id; a rejected status does not reserve it.
+    seen.add(row.id);
+    result.counts[row.status as keyof RemoteRoster["counts"]]++;
+    if (row.attention !== "blocked" && row.attention !== "waiting" && row.attention !== "done") continue;
+    result.needsYou.push({ id: row.id, name: uiString(row.name, 64), lastLine: safePrompt(row.lastLine), attention: row.attention });
+  }
+  result.needsYou.sort((a, b) => rank[a.attention] - rank[b.attention]);
+  result.overflow = Math.max(0, result.needsYou.length - 4);
+  result.needsYou = result.needsYou.slice(0, 4);
+  return result;
+}
+export function readRemoteRoster(path = process.env.INFOMARCHY_REMOTE_ROSTER, stamp = Date.now()): RemoteRoster | undefined {
+  if (!path) return undefined;
+  const workspace = remoteWorkspace();
+  const withWorkspace = (roster: RemoteRoster): RemoteRoster => workspace ? { ...roster, workspace } : roster;
+  let stat;
+  try { stat = lstatSync(path); }
+  catch (error) {
+    return ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code || "") ? undefined : withWorkspace(unavailableRoster());
+  }
+  const text = readRegularFileLimited(path, MAX_REMOTE_ROSTER_BYTES);
+  return withWorkspace(text === null ? unavailableRoster() : parseRemoteRoster(text, stat.mtimeMs, stamp));
+}
+
 // ---------------------------------------------------------------- main
 export function frameSnapshot(value: unknown): string {
   // sanitizeForUi caps depth at 12 and every collection, so an input that
   // passed its own bounds but sits deeper inside the snapshot (a 22-level
   // object smuggled in as a pid) can no longer trip the budget check into
   // replacing the whole desk with an error frame.
-  const sanitized = sanitizeForUi(value);
+  let sanitized = sanitizeForUi(value);
+  // Optional roster data must never turn a valid local desk into an error frame.
+  if (sanitized?.ai?.remoteRoster !== undefined &&
+      (!structureWithinBudget(sanitized, MAX_JSON_NODES, MAX_JSON_DEPTH) || Buffer.byteLength(JSON.stringify(sanitized), "utf8") > MAX_SNAPSHOT_BYTES)) {
+    delete sanitized.ai.remoteRoster;
+  }
   if (!structureWithinBudget(sanitized, MAX_JSON_NODES, MAX_JSON_DEPTH)) throw new Error("snapshot structure exceeded budget");
   const payload = JSON.stringify(sanitized);
   if (Buffer.byteLength(payload, "utf8") > MAX_SNAPSHOT_BYTES) throw new Error("snapshot exceeded byte budget");
@@ -3663,6 +3763,7 @@ async function runCollector() {
       heatmap: { start: start7, days: heatDays, cells: heat.map(c => [c.n, c.p]) },
       github, gitea,
       fleet,
+      remoteRoster: readRemoteRoster(),
       recent: dashboardRecent, recentTruncated,
     },
   };

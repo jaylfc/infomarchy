@@ -391,6 +391,9 @@ Item {
   }
   function sessionHostDetail(item) {
     return (item.hosts || []).map(function(host) {
+      // The tab handle is what the inspector can act on, and its short form is
+      // what `orca terminal list` prints beside the tab title.
+      if (host.kind === "orca") return "Orca tab " + String(host.handle || "—").replace(/^term_/, "").slice(0, 8) + (host.worktree ? " · " + String(host.worktree) : "")
       if (host.kind === "boomux") return "Boomux shell " + String(host.shellId || "—").slice(0, 8) + " · run " + String(host.runId || "—").slice(0, 8)
       if (host.kind === "herdr") return "Herdr " + [host.workspaceId, host.tabId, host.paneId].filter(Boolean).join(" / ")
       if (host.kind === "tmux") return "tmux " + String(host.session || "?") + ":" + String(host.window || "?") + "." + String(host.pane || "?") + " · pane " + String(host.paneId || "—")
@@ -2064,10 +2067,10 @@ Item {
         }
       }
 
-      // RIGHT COLUMN: usage + local AI + machine corner
+      // RIGHT COLUMN: usage + local AI + remote roster + machine corner
       GridLayout {
         id: rightColumn
-        visible: view.sectionEnabled("usage") || view.sectionEnabled("localAi") || view.sectionEnabled("machine") || view.sectionEnabled("media") || view.sectionEnabled("containers") || view.sectionEnabled("fleet")
+        visible: view.sectionEnabled("usage") || view.sectionEnabled("localAi") || view.sectionEnabled("machine") || view.sectionEnabled("media") || view.sectionEnabled("containers") || view.sectionEnabled("fleet") || !!view.ai.remoteRoster
         Layout.fillHeight: true
         // A fixed column: content-driven widths let the column drift narrower
         // whenever card text became shrinkable, and rows then overran the border.
@@ -2601,6 +2604,64 @@ Item {
               }
               }
             }
+          }
+        }
+
+        // Remote agents are compact, read-only lines, independent of sessions.
+        Card {
+          id: remoteRosterCard
+          Layout.row: view.settings.rightIndex("remoteRoster")
+          Layout.column: 0
+          Layout.fillWidth: true
+          visible: !!view.ai.remoteRoster
+          title: "REMOTE"
+          readonly property var roster: view.ai.remoteRoster || ({ state: "unavailable", fetchedAt: 0, counts: {}, needsYou: [], overflow: 0 })
+          // Keep the 1080p right column compact; larger desks may show all four.
+          readonly property int rowLimit: view.height / Style.fontScale <= 1080 ? 2 : 4
+          readonly property var rows: roster.needsYou.slice(0, rowLimit)
+          readonly property int remaining: roster.overflow + roster.needsYou.length - rows.length
+          hint: (roster.state === "unavailable" ? "unavailable" : (roster.state === "stale" ? "stale · " : "") + view.desk.ago(roster.fetchedAt)) + (roster.workspace ? " · click to open" : "")
+          ColumnLayout {
+            anchors { left: parent.left; right: parent.right }
+            spacing: Style.spacing.xs
+            PlainText {
+              Layout.fillWidth: true
+              text: remoteRosterCard.roster.state === "unavailable" ? "roster unavailable" : remoteRosterCard.roster.counts.busy + " busy · " + remoteRosterCard.roster.counts.idle + " idle · " + remoteRosterCard.roster.counts.offline + " offline"
+              color: view.textDim
+              font.family: view.mono
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+            Repeater {
+              model: remoteRosterCard.rows
+              delegate: PlainText {
+                required property var modelData
+                Layout.fillWidth: true
+                text: modelData.attention + " · " + (modelData.name || modelData.id) + " · " + modelData.lastLine
+                color: modelData.attention === "blocked" ? view.desk.red : view.desk.providerColor("remote")
+                font.family: view.mono
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+            }
+            PlainText {
+              visible: remoteRosterCard.remaining > 0
+              text: "+" + remoteRosterCard.remaining
+              color: view.textFaint
+              font.family: view.mono
+              font.pixelSize: Style.font.caption
+            }
+          }
+          // The only action the card offers, and only when the operator has said
+          // where their own view of these agents is. It focuses a workspace; it
+          // never touches the agents themselves.
+          MouseArea {
+            anchors.fill: parent
+            z: 1
+            enabled: view.interactive && !!remoteRosterCard.roster.workspace
+            hoverEnabled: enabled
+            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: view.desk.focusWorkspace(remoteRosterCard.roster.workspace)
           }
         }
 

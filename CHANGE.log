@@ -50,6 +50,41 @@ usageVisible and this PR's webEnabled in `active`.
 
 555 tests pass on the merged tree. Fifth contribution from this author.
 
+### REMOTE: an optional roster file becomes a read-only card (#13)
+
+**Wulf Kaal** · GitHub [@wulfkaal](https://github.com/wulfkaal) · X [@WulfKaal](https://x.com/WulfKaal)
+
+Agents running somewhere this machine cannot see (a VPS, a colleague's box, a
+CI runner) get a card, as long as something over there drops a JSON roster file
+and `INFOMARCHY_REMOTE_ROSTER` points at it. No roster variable means no card,
+no file read, no network. The collector reads that file on its own tick: nothing
+reaches across a network to build a card, which is the promise the README makes.
+
+Read-only on purpose. A remote agent has no pid here, nothing to focus and
+nothing to stop, so the card has no per-row actions at all. Its single action is
+an optional workspace number to jump to.
+
+Rebased by me, not by the author, after eight days with no reply and 82 commits
+of drift. Fred's call. His authorship is kept; the conflicts were entirely
+master moving underneath:
+- the right-column order gained FLEET (#35) and CONTAINERS (#19) since this was
+  written, so `remoteRoster` joins the full list rather than replacing it, and
+  sits after LOCAL AI where the review asked for it. His own migration function
+  needed no change: it appends whatever is missing and then inserts remoteRoster
+  after localAi, so the seven-card list migrates correctly.
+- `collector.ts` kept gitea, fleet and the roster in the snapshot.
+- `InfoModel.qml` kept both the fleet-session jump (#37) and his focusWorkspace.
+- the InfoView resolve ceiling went 602 to 609 for the card's delegate.
+- his layout differential test evaluated bindings that have since become
+  multi-line and gained a `dense` flag; the helper now reads both from source,
+  so the test still compares what the desk actually computes.
+
+Verified live rather than only in tests: with no variable set the snapshot has
+no roster at all; pointed at a file it produced the counts and the NEEDS YOU row;
+and a roster line carrying `GITHUB_TOKEN=ghp_...` came out as `[redacted]`.
+
+576 tests pass on the merged tree. Second contribution from this author (after #12).
+
 ### Local usage collection, an optional billing meter, and HARD REFRESH (#16)
 
 **TechLuddite** · GitHub [@TechLuddite](https://github.com/TechLuddite) · X [@gh_TechLuddite](https://x.com/gh_TechLuddite)

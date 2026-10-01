@@ -24,6 +24,7 @@ Item {
   property string containerControlPath: Qt.resolvedUrl("container-control.ts").toString().replace(/^file:\/\//, "")
   property string previewPath: Qt.resolvedUrl("window-preview.ts").toString().replace(/^file:\/\//, "")
   property string herdrFocusPath: Qt.resolvedUrl("herdr-focus.ts").toString().replace(/^file:\/\//, "")
+  property string orcaFocusPath: Qt.resolvedUrl("orca-focus.ts").toString().replace(/^file:\/\//, "")
   property string stopPath: Qt.resolvedUrl("stop-session.ts").toString().replace(/^file:\/\//, "")
   // Read from manifest.json so the About panel can never drift from the
   // version the plugin actually ships as.
@@ -147,6 +148,7 @@ Item {
       case "pi": return root.green
       case "cursor": return root.cyan
       case "aider": return root.yellow
+      case "remote": return root.cyan
       case "copilot": return root.magenta
       default: return Color.accent
     }
@@ -180,6 +182,7 @@ Item {
       case "pi": return "Pi"
       case "cursor": return "Cursor"
       case "aider": return "Aider"
+      case "remote": return "Remote"
       case "copilot": return "Copilot"
       default: return plainText(p, 64)
     }
@@ -432,6 +435,17 @@ Item {
     return true
   }
 
+  // Focus a Hyprland workspace by number, on both dispatch syntaxes. Used only
+  // by the REMOTE card, whose agents have no window here to focus.
+  function focusWorkspace(workspace) {
+    var ws = String(workspace || "")
+    if (!/^[1-9][0-9]?$/.test(ws)) return
+    if (root.snap && root.snap.hyprLua)
+      Quickshell.execDetached(["hyprctl", "dispatch", 'hl.dsp.focus({ workspace = ' + ws + ' })'])
+    else
+      Quickshell.execDetached(["hyprctl", "dispatch", "workspace", ws])
+  }
+
   // An agent inside tmux may live on a window/pane the client is not showing.
   // After focusing the terminal, select that pane so the agent is on screen.
   // Both values come from the collector and are validated here again.
@@ -457,6 +471,16 @@ Item {
   // Herdr's CLI has no focus-pane-by-id; its socket API does (pane.focus).
   // herdr-focus.ts sends workspace.focus → tab.focus → pane.focus over the
   // agent's own session socket, re-validating every id.
+  // Orca keeps its agents in tabs inside one window, so there is no separate
+  // window to raise: `orca terminal switch <handle>` brings the right tab
+  // forward, and the handle came from the agent's own environment.
+  function focusOrcaTerminal(host) {
+    var handle = String((host || {}).handle || "")
+    if (!/^term_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(handle)) return false
+    Quickshell.execDetached(["bun", root.orcaFocusPath, handle])
+    return true
+  }
+
   function focusHerdrPane(host) {
     var h = host || {}
     var workspace = herdrId(h.workspaceId, "workspace"), tab = herdrId(h.tabId, "tab"), pane = herdrId(h.paneId, "pane")
@@ -526,6 +550,10 @@ Item {
     if (!(item.window && item.window.address)) {
       // No window we can point at: Boomux can (re)open the shell's own terminal,
       // and a background Claude session can be attached in a new terminal.
+      // Orca first: its agents have no window of their own to point at, the
+      // window belongs to Orca and the agent lives in a tab inside it.
+      var orca = (item.hosts || []).filter(function(host) { return host && host.kind === "orca" && host.handle })[0]
+      if (orca) return focusOrcaTerminal(orca)
       var boomux = (item.hosts || []).filter(function(host) { return host && host.kind === "boomux" && host.shellId })[0]
       if (boomux) return focusBoomuxShell(boomux)
       if (item.provider === "claude" && (item.hosts || []).some(function(h) { return h && h.kind === "background" })) return attachBackground(item)
@@ -541,6 +569,7 @@ Item {
       // collector's client-window lookup never runs. Gating here meant the
       // click focused Herdr and then left it on whatever workspace was already
       // showing. focusHerdrPane re-validates the ids and does nothing without.
+      else if (host.kind === "orca") focusOrcaTerminal(host)
       else if (host.kind === "herdr") focusHerdrPane(host)
       else if (host.kind === "boomux" && host.shellId) focusBoomuxShell(host)
     }
