@@ -900,7 +900,7 @@ function contextId(value: unknown): string {
   return /^[A-Za-z0-9%][A-Za-z0-9_.:%-]{0,127}$/.test(id) ? id : "";
 }
 export type SessionHost = {
-  kind: "orca" | "herdr" | "boomux" | "tmux" | "background";
+  kind: "orca" | "herdr" | "boomux" | "tmux" | "background" | "daemon";
   label: string;
   workspace?: string;
   workspaceId?: string;
@@ -927,6 +927,10 @@ export type SessionHost = {
   handle?: string;
   // Orca: the worktree path the tab was opened in, for the card's label only.
   worktree?: string;
+  // Daemon: which supervisor started this agent, and whether that supervisor
+  // ships an attach the desk can open a terminal with.
+  owner?: string;
+  attach?: string;
 };
 export const DEFAULT_HERDR_SOCKET = join(HOME, ".config/herdr/herdr.sock");
 export function herdrSocketFromEnvironment(environ = ""): string {
@@ -949,6 +953,21 @@ export function herdrSocketOrDefault(socket: unknown, fallback = DEFAULT_HERDR_S
 // never matched it). Its child is a real, live Claude session — worth a card —
 // but it has no terminal and often no owner watching it. Label it so it is
 // not mistaken for a duplicate of the interactive session in the same repo.
+// An agent started by a supervisor has no terminal of its own: no controlling
+// tty, and stdout is a socket or a pipe owned by its parent. Measured on gus:
+// the harness CLI's helper agents and no-mistakes' pipeline workers both run
+// this way. There is nothing to raise and no pane to select, so the honest
+// thing is to name the owner on the card instead of letting the click look
+// broken. Where the owner ships its own attach, the card can use it.
+export type DaemonOwner = { owner: string; label: string; attach: "no-mistakes" | "" };
+export function daemonOwnerOf(cmd: string[]): DaemonOwner | null {
+  const line = (cmd || []).join(" ");
+  if (/(^|\/)no-mistakes(\s|$)/.test(line) && /\bdaemon\b/.test(line))
+    return { owner: "no-mistakes", label: "no-mistakes pipeline", attach: "no-mistakes" };
+  if (/\.harness\/(cli|runtime)\b/.test(line) || /(^|\/)harness(\s|$)/.test(line))
+    return { owner: "harness", label: "harness", attach: "" };
+  return null;
+}
 export function backgroundDaemonKind(cmd: string[]): string {
   const head = String(cmd[0] || "");
   if (/(^|\/)claude bg-pty-host$/.test(head) || (/(^|\/)claude$/.test(head) && cmd[1] === "bg-pty-host")) return "claude";
@@ -1719,6 +1738,11 @@ async function liveSessions(pids: number[]) {
     for (const ancestor of processAncestors(p.pid).slice(1)) {
       const daemon = backgroundDaemonKind(cmdByPid.get(ancestor) || []);
       if (daemon) { hosts.push({ kind: "background", label: "background · " + daemon + " daemon" }); break; }
+      const supervisor = daemonOwnerOf(cmdByPid.get(ancestor) || []);
+      if (supervisor) {
+        hosts.push({ kind: "daemon", label: "run by " + supervisor.label, owner: supervisor.owner, attach: supervisor.attach });
+        break;
+      }
     }
     // A daemon-hosted session has no terminal: it was reparented to systemd
     // and the multiplexer ids still in its environment belong to whoever

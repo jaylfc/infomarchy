@@ -26,6 +26,17 @@ export function resumeAgentCommand(provider: unknown, sessionId: unknown): strin
   return RESUME_COMMANDS[name](id);
 }
 
+// no-mistakes attaches to the pipeline run for a REPOSITORY, not to a session
+// id, so this cannot go through RESUME_COMMANDS. Its workers have no terminal
+// of their own (parent is `no-mistakes daemon run`, stdout a pipe), which is
+// why the desk needs a way to open one.
+export function daemonAttachCommand(owner: unknown, cwd: unknown, home = process.env.HOME || ""): string[] | null {
+  if (String(owner || "") !== "no-mistakes") return null;
+  const directory = normalizeProjectDirectory(cwd, home);
+  if (!directory) return null;
+  return ["uwsm-app", "--", "xdg-terminal-exec", "--dir=" + directory, "no-mistakes", "attach"];
+}
+
 export function terminalResumeCommand(provider: unknown, sessionId: unknown, cwd: unknown, home = process.env.HOME || ""): string[] | null {
   const agent = resumeAgentCommand(provider, sessionId);
   if (!agent) return null;
@@ -38,6 +49,12 @@ export function terminalResumeCommand(provider: unknown, sessionId: unknown, cwd
 
 if (import.meta.main) {
   const args = process.argv.slice(2);
+  if (args[0] === "daemon-attach") {
+    const command = daemonAttachCommand(args[1], args[2]);
+    if (!command) process.exit(2);
+    Bun.spawn(command, { stdout: "ignore", stderr: "ignore", stdin: "ignore" }).unref();
+    process.exit(0);
+  }
   const printOnly = args[0] === "--print";
   const offset = printOnly ? 1 : 0;
   const command = terminalResumeCommand(args[offset], args[offset + 1], args[offset + 2]);

@@ -68,7 +68,9 @@ const CEILINGS: Record<string, number> = {
   // rest of this count is made of.
   // +1: sessionFactLine() reads view.desk for the duration formatter, the
   // same outer-scope false positive as every other helper in this file.
-  "InfoView.qml": 612,
+  // +1: jumpHint() reads the session's hosts through the outer scope, the
+  // same unqualified false positive as every other helper here.
+  "InfoView.qml": 613,
   "Overlay.qml": 29,
   "WaveWallpaper.qml": 0,
   // Settings drawer (#25): dynamic Style properties qmllint sees as QObject,

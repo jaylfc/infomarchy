@@ -358,6 +358,21 @@ Item {
   // fallback was the literal string "topic unavailable", which is the card
   // admitting it has nothing while the snapshot is holding the branch, the
   // worktree, the process count and the uptime. Facts beat an apology.
+  // What a click will actually do, said on the card. A session with no window
+  // and no reachable host cannot be jumped to at all: it was started by a
+  // supervisor, has no controlling terminal, and its output goes down a pipe
+  // to its parent. Saying so beats a card that silently ignores every click.
+  function jumpHint(item) {
+    var s = item || ({}), hosts = s.hosts || []
+    var has = function(kind) { return hosts.some(function(h) { return h && h.kind === kind }) }
+    if (s.window) return " · click jumps to the pane"
+    if (hosts.some(function(h) { return h && h.kind === "orca" && h.handle })) return " · click opens its Orca tab"
+    if (has("herdr")) return " · click opens its Herdr pane"
+    if (hosts.some(function(h) { return h && h.kind === "background" && h.attachId })) return " · click attaches a terminal"
+    if (hosts.some(function(h) { return h && h.kind === "daemon" && h.attach })) return " · click attaches a terminal"
+    if (has("daemon")) return " · no terminal to jump to"
+    return " · no terminal to jump to"
+  }
   function sessionFactLine(item) {
     var s = item || ({}), parts = []
     var git = s.git || null
@@ -409,6 +424,7 @@ Item {
     return (item.hosts || []).map(function(host) {
       // The tab handle is what the inspector can act on, and its short form is
       // what `orca terminal list` prints beside the tab title.
+      if (host.kind === "daemon") return "run by " + String(host.owner || "a supervisor") + (host.attach ? " · attachable" : " · no terminal of its own")
       if (host.kind === "orca") return "Orca tab " + String(host.handle || "—").replace(/^term_/, "").slice(0, 8) + (host.worktree ? " · " + String(host.worktree) : "")
       if (host.kind === "boomux") return "Boomux shell " + String(host.shellId || "—").slice(0, 8) + " · run " + String(host.runId || "—").slice(0, 8)
       if (host.kind === "herdr") return "Herdr " + [host.workspaceId, host.tabId, host.paneId].filter(Boolean).join(" / ")
@@ -1543,7 +1559,7 @@ Item {
                     elide: Text.ElideRight
                   }
                   PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && (!!sc.modelData.cwd); text: view.displayPath(sc.modelData.cwd || ""); color: view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle }
-                  PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && ((sc.modelData.hosts || []).length > 0); text: "hosted in " + view.sessionHostLabel(sc.modelData) + (sc.modelData.window ? " · click jumps to the pane" : ((sc.modelData.hosts || []).some(function(h) { return h && h.kind === "background" && h.attachId }) ? " · click attaches a terminal" : " · no client window found")); color: sc.tone; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+                  PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && ((sc.modelData.hosts || []).length > 0); text: "hosted in " + view.sessionHostLabel(sc.modelData) + view.jumpHint(sc.modelData); color: sc.tone; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                   PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && (!!view.displayTopic(sc.modelData.topic) && !!(sc.modelData.window && sc.modelData.window.title)); text: view.displayTitle((sc.modelData.window || {}).title); color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                   PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && (!!sc.modelData.git); text: sc.modelData.git ? ("git " + sc.modelData.git.branch + (sc.modelData.git.dirty ? " · " + sc.modelData.git.dirty + " changed" : " · clean") + (sc.modelData.git.ahead ? " · ↑" + sc.modelData.git.ahead : "") + (sc.modelData.git.behind ? " · ↓" + sc.modelData.git.behind : "") + (sc.modelData.git.conflicts ? " · " + sc.modelData.git.conflicts + " conflicts" : "")) : ""; color: sc.modelData.git && sc.modelData.git.conflicts ? view.desk.red : sc.modelData.git && sc.modelData.git.dirty ? view.desk.yellow : view.desk.green; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                   PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; text: "pid " + sc.modelData.pid + (sc.modelData.name ? " · " + sc.modelData.name : "") + (sc.modelData.window ? " · ws " + sc.modelData.window.workspace : " · no window") + " · cpu " + (sc.modelData.resources && sc.modelData.resources.cpuPct !== null ? sc.modelData.resources.cpuPct.toFixed(1) + "%" : "—") + " · ram " + ((sc.modelData.resources || {}).rss !== null ? view.desk.bytes((sc.modelData.resources || {}).rss) : "—") + " · " + ((sc.modelData.resources || {}).processes !== null ? ((sc.modelData.resources || {}).processes || 0) : "—") + " proc" + ((sc.modelData.resources || {}).gpuMemory ? " · gpu " + view.desk.bytes(sc.modelData.resources.gpuMemory) : ""); color: view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }

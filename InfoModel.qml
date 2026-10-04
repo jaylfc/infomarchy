@@ -537,6 +537,17 @@ Item {
   }
   // A background (daemon-hosted) Claude session has no terminal at all; open
   // one attached to it. Returns false when there is nothing to attach to.
+  // `no-mistakes attach` joins the active pipeline run for a repository, so
+  // the jump is a terminal opened in the worker's own directory.
+  function attachDaemonRun(host, session) {
+    var owner = String((host || {}).attach || "")
+    if (owner !== "no-mistakes") return false
+    var cwd = String((session || {}).cwd || "")
+    if (!canOpenProject(cwd)) return false
+    Quickshell.execDetached(["bun", root.resumePath, "daemon-attach", owner, cwd])
+    return true
+  }
+
   function attachBackground(session) {
     var item = session || {}
     var host = (item.hosts || []).filter(function(h) { return h && h.kind === "background" && h.attachId })[0]
@@ -561,6 +572,11 @@ Item {
       // "no client window found" did nothing at all when clicked.
       var herdr = (item.hosts || []).filter(function(host) { return host && host.kind === "herdr" })[0]
       if (herdr && focusHerdrPane(herdr)) return true
+      // A supervisor-run agent has no terminal anywhere on this machine. If
+      // its owner ships an attach, open one; otherwise there is genuinely
+      // nothing to jump to and the card says so rather than ignoring clicks.
+      var daemon = (item.hosts || []).filter(function(host) { return host && host.kind === "daemon" && host.attach })[0]
+      if (daemon) return attachDaemonRun(daemon, item)
       var boomux = (item.hosts || []).filter(function(host) { return host && host.kind === "boomux" && host.shellId })[0]
       if (boomux) return focusBoomuxShell(boomux)
       if (item.provider === "claude" && (item.hosts || []).some(function(h) { return h && h.kind === "background" })) return attachBackground(item)
