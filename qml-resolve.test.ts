@@ -63,7 +63,10 @@ const CEILINGS: Record<string, number> = {
   // +7 (#13): the REMOTE card's delegate reads view.desk, view.settings and
   // Style through the outer scope, the same unqualified false positive every
   // other card in this file contributes.
-  "InfoView.qml": 609,
+  // +2: the inspector's CLOSE tag reads view.desk and view.textDim from the
+  // outer scope for its hover tint, the same unqualified false positive the
+  // rest of this count is made of.
+  "InfoView.qml": 611,
   "Overlay.qml": 29,
   "WaveWallpaper.qml": 0,
   // Settings drawer (#25): dynamic Style properties qmllint sees as QObject,

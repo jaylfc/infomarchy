@@ -3068,18 +3068,36 @@ Item {
     MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; onClicked: function(mouse) { mouse.accepted = true } }
     ColumnLayout {
       id: inspectorColumn
-      anchors { fill: parent; margins: view.pad }
+      // The panel is rounded, so a plain `pad` inset puts the corner controls
+      // (CLOSE top-right, the action row bottom-left) inside the curve, where
+      // they read as crammed against the border. Clearing the arc costs a few
+      // pixels and is a no-op on a square theme, where radius is 0.
+      anchors { fill: parent; margins: view.pad + Math.round(view.radius * 0.5) }
       spacing: Style.spacing.md
       RowLayout {
         Layout.fillWidth: true
+        spacing: Style.spacing.sm
         Rectangle { width: 9; height: 9; radius: 5; color: sessionInspector.tone }
         PlainText { text: view.desk.providerLabel(sessionInspector.session.provider) + " SESSION"; color: sessionInspector.tone; font.family: view.mono; font.pixelSize: Style.font.subtitle; font.bold: true }
         Item { Layout.fillWidth: true }
         PlainText { text: view.desk.dur(sessionInspector.session.uptimeSec) + " · pid " + (sessionInspector.session.pid || "—"); color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption }
+        // Square-ish and glyph-led so it reads as a window control rather than
+        // another action chip: the chips along the bottom all DO something to
+        // the session, this one only dismisses the drawer.
         Tag {
-          text: "CLOSE"
-          tone: view.textDim
-          MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.inspectedSession = null }
+          id: closeTag
+          text: "\u2715  CLOSE"
+          // MouseArea, not HoverHandler: declarative pointer handlers get no
+          // events on this Quickshell/Wayland stack.
+          tone: closeMouse.containsMouse ? view.desk.red : view.textDim
+          Layout.leftMargin: Style.spacing.sm
+          MouseArea {
+            id: closeMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: view.inspectedSession = null
+          }
         }
       }
       PlainText { Layout.fillWidth: true; text: view.displayPath(sessionInspector.session.cwd || "") || "unknown project"; color: view.desk.themeForeground; font.family: view.mono; font.pixelSize: Style.font.subtitle; elide: Text.ElideMiddle }
