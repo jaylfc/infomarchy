@@ -1229,6 +1229,83 @@ describe("machine parsers refuse garbage", () => {
       { mount: "/mnt/data two", size: 200, used: 60, avail: 140, pct: 30 },
     ]);
   });
+  test("df keeps the first valid row when the same full path is repeated with different numbers", () => {
+    expect(parseDfRows("Mounted on Size Used Avail\n"
+      + "/mnt/data 100 20 80\n/mnt/data 200 30 170\n")).toEqual([
+      { mount: "/mnt/data", size: 100, used: 20, avail: 80, pct: 20 },
+    ]);
+  });
+  test("df shows one row when two mounts report the same size and used", () => {
+    expect(parseDfRows("Mounted on Size Used Avail\n"
+      + "/ 100 40 60\n/home 100 40 60\n")).toEqual([
+      { mount: "/", size: 100, used: 40, avail: 60, pct: 40 },
+    ]);
+  });
+  test("df recovers a mount when an invalid row is followed by a valid row", () => {
+    expect(parseDfRows("Mounted on Size Used Avail\n"
+      + "/a 0 0 0\n/a 100 20 80\n")).toEqual([
+      { mount: "/a", size: 100, used: 20, avail: 80, pct: 20 },
+    ]);
+  });
+  test("df does not let a recovered mount replace an earlier mount with the same numbers", () => {
+    expect(parseDfRows("Mounted on Size Used Avail\n"
+      + "/b 100 20 80\n/a 0 0 0\n/a 100 20 80\n")).toEqual([
+      { mount: "/b", size: 100, used: 20, avail: 80, pct: 20 },
+    ]);
+    // The recovered row is the earlier valid mount, so it keeps the pool slot.
+    expect(parseDfRows("Mounted on Size Used Avail\n"
+      + "/a 0 0 0\n/a 100 20 80\n/b 100 20 80\n")).toEqual([
+      { mount: "/a", size: 100, used: 20, avail: 80, pct: 20 },
+    ]);
+  });
+  test("a 10000-character whitespace df row is skipped in under 5 ms", () => {
+    const suffix = "X 100 40 60";
+    const huge = "/" + " ".repeat(10000 - 1 - suffix.length) + suffix;
+    const bounded = "/" + " ".repeat(4096 - 1 - suffix.length) + suffix;
+    expect(huge.length).toBe(10000);
+    expect(bounded.length).toBe(4096);
+    const header = "Mounted on Size Used Avail\n";
+    const shown = { mount: "/" + " ".repeat(127), size: 100, used: 40, avail: 60, pct: 40 };
+    parseDfRows(header + huge);
+    const start = performance.now();
+    const oversized = parseDfRows(header + huge);
+    const withinCap = parseDfRows(header + bounded);
+    expect(performance.now() - start).toBeLessThan(5);
+    expect(withinCap).toEqual([shown]);
+    expect(oversized).toEqual([]);
+  });
+  test("df text in the live column layout matches the rows the previous parser accepted", () => {
+    // Synthetic `df -B1 --output=target,size,used,avail` text with round sizes.
+    // Rows with the same size and used as an earlier mount are absent from the
+    // expected rows: pool suppression. Both parsers return the same rows here.
+    const output = [
+      "Mounted on                             1B-blocks          Used         Avail",
+      "/dev                                  8000000000             0    8000000000",
+      "/run                                  8000000000       8000000    7992000000",
+      "/                                  1000000000000  500000000000  500000000000",
+      "/dev/shm                              8000000000      80000000    7920000000",
+      "/run/credentials/example-a.service       1000000             0       1000000",
+      "/run/credentials/example-b.service       1000000          4000        996000",
+      "/tmp                                  8000000000     200000000    7800000000",
+      "/var/log                           1000000000000  500000000000  500000000000",
+      "/home                              1000000000000  500000000000  500000000000",
+      "/boot                                 2000000000    1000000000    1000000000",
+      "/run/user/1000                        4000000000     100000000    3900000000",
+      "/home/user/Cloud Drive             2000000000000 1500000000000  500000000000",
+    ].join("\n");
+    expect(parseDfRows(output)).toEqual([
+      { mount: "/dev", size: 8000000000, used: 0, avail: 8000000000, pct: 0 },
+      { mount: "/run", size: 8000000000, used: 8000000, avail: 7992000000, pct: 0.1 },
+      { mount: "/", size: 1000000000000, used: 500000000000, avail: 500000000000, pct: 50 },
+      { mount: "/dev/shm", size: 8000000000, used: 80000000, avail: 7920000000, pct: 1 },
+      { mount: "/run/credentials/example-a.service", size: 1000000, used: 0, avail: 1000000, pct: 0 },
+      { mount: "/run/credentials/example-b.service", size: 1000000, used: 4000, avail: 996000, pct: 0.4 },
+      { mount: "/tmp", size: 8000000000, used: 200000000, avail: 7800000000, pct: 2.5 },
+      { mount: "/boot", size: 2000000000, used: 1000000000, avail: 1000000000, pct: 50 },
+      { mount: "/run/user/1000", size: 4000000000, used: 100000000, avail: 3900000000, pct: 2.5 },
+      { mount: "/home/user/Cloud Drive", size: 2000000000000, used: 1500000000000, avail: 500000000000, pct: 75 },
+    ]);
+  });
   test("observational git argv pins fsmonitor, hooks, and credential helper", () => {
     const cmd = observationalGitCommand("/tmp/repo", ["status", "--porcelain=v2", "--branch"]);
     expect(cmd[0]).toBe("git");
