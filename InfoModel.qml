@@ -554,6 +554,13 @@ Item {
       // window belongs to Orca and the agent lives in a tab inside it.
       var orca = (item.hosts || []).filter(function(host) { return host && host.kind === "orca" && host.handle })[0]
       if (orca) return focusOrcaTerminal(orca)
+      // Herdr belongs here too. Its client draws every workspace inside ONE
+      // window, so a session whose client window could not be resolved still
+      // has a real address: the workspace/tab/pane triple. Without this the
+      // click fell through to `return false` and a herdr card reading
+      // "no client window found" did nothing at all when clicked.
+      var herdr = (item.hosts || []).filter(function(host) { return host && host.kind === "herdr" })[0]
+      if (herdr && focusHerdrPane(herdr)) return true
       var boomux = (item.hosts || []).filter(function(host) { return host && host.kind === "boomux" && host.shellId })[0]
       if (boomux) return focusBoomuxShell(boomux)
       if (item.provider === "claude" && (item.hosts || []).some(function(h) { return h && h.kind === "background" })) return attachBackground(item)

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { herdrFocusRequests, sendHerdrRequests, validHerdrSocket } from "./herdr-focus";
@@ -56,5 +56,32 @@ describe("Herdr focus helper", () => {
     const ok = await sendHerdrRequests("/nonexistent/herdr.sock", herdrFocusRequests("wM", "", ""), 500);
     expect(ok).toBe(0);
     expect(performance.now() - started).toBeLessThan(1500);
+  });
+});
+
+describe("a herdr session is reachable even when its client window is not", () => {
+  const collector = readFileSync(join(import.meta.dir, "collector.ts"), "utf8");
+  const model = readFileSync(join(import.meta.dir, "InfoModel.qml"), "utf8");
+
+  test("an unset client socket means the default socket, not 'no match'", () => {
+    // Measured on gus: the agent's environment carried the explicit default
+    // path while the herdr CLIENT processes carried no HERDR_SOCKET_PATH at
+    // all. Comparing raw strings meant "" never equalled the default, so no
+    // window resolved, the card read "no client window found", and the click
+    // did nothing. Both sides are normalised now.
+    expect(collector).toContain("export function herdrSocketOrDefault");
+    const resolver = collector.match(/export function herdrWindowFor[\s\S]*?\n\}/)![0];
+    expect(resolver).toContain("herdrSocketOrDefault(host.socket, fallback)");
+    expect(resolver).toContain("herdrSocketOrDefault(client.socket, fallback)");
+    expect(resolver).not.toContain("if (!socket) return null");
+  });
+
+  test("the no-window click path tries herdr before giving up", () => {
+    const focus = model.match(/function focusSession\(session\)[\s\S]*?\n  \}/)![0];
+    const noWindow = focus.slice(0, focus.indexOf("focusWindow(item.window.address)"));
+    expect(noWindow).toContain('host.kind === "herdr"');
+    expect(noWindow).toContain("focusHerdrPane(herdr)");
+    // Orca stays first: its agents never have a window of their own.
+    expect(noWindow.indexOf('host.kind === "orca"')).toBeLessThan(noWindow.indexOf('host.kind === "herdr"'));
   });
 });

@@ -928,9 +928,19 @@ export type SessionHost = {
   // Orca: the worktree path the tab was opened in, for the card's label only.
   worktree?: string;
 };
+export const DEFAULT_HERDR_SOCKET = join(HOME, ".config/herdr/herdr.sock");
 export function herdrSocketFromEnvironment(environ = ""): string {
   const socket = String(envValue(environ, "HERDR_SOCKET_PATH") || "");
   return socket.length > 0 && socket.length <= 256 && socket.startsWith("/") && socket.endsWith(".sock") && !/[\u0000-\u001f\u007f\s]/.test(socket) ? socket : "";
+}
+// A herdr client started without HERDR_SOCKET_PATH is on the default socket,
+// which is where the agent's own environment points too. Comparing the raw
+// strings made an unset client ("") never equal a session carrying the
+// explicit default path, so herdrWindowFor found no window, the card said
+// "no client window found", and the click did nothing. Normalise both sides.
+export function herdrSocketOrDefault(socket: unknown, fallback = DEFAULT_HERDR_SOCKET): string {
+  const value = String(socket || "").trim();
+  return value || fallback;
 }
 // Extract only documented multiplexer identity variables. Never serialize or
 // search the rest of /proc/<pid>/environ, which may contain credentials.
@@ -1554,10 +1564,9 @@ export function herdrClientPids(commands: Map<number, string[]>): number[] {
   }
   return result.slice(0, 32);
 }
-export function herdrWindowFor(host: SessionHost, clients: HerdrClient[]): any {
-  const socket = String(host.socket || "");
-  if (!socket) return null;
-  const match = clients.find(client => client.window && client.socket === socket);
+export function herdrWindowFor(host: SessionHost, clients: HerdrClient[], fallback = DEFAULT_HERDR_SOCKET): any {
+  const socket = herdrSocketOrDefault(host.socket, fallback);
+  const match = clients.find(client => client.window && herdrSocketOrDefault(client.socket, fallback) === socket);
   return match ? match.window : null;
 }
 // `claude agents --json` is Claude Code's own registry of every running
