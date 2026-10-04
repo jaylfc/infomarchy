@@ -246,9 +246,25 @@ describe("zombie cleanup is explicit and two-click", () => {
     const view = readFileSync(join(import.meta.dir, "InfoView.qml"), "utf8");
     expect(view).toContain('text: "STALE · idle "');
     expect(view).toContain('text: armed ? "CONFIRM STOP" : "STOP SESSION"');
-    expect(view).toContain('text: armed ? "CONFIRM END (SIGTERM)" : "END PROCESS"');
     expect(model).toContain('["bun", root.stopPath, "claude-stop", String(item.jobId)]');
     expect(model).toContain('["bun", root.stopPath, "term", String(Number(item.pid)), String(Math.round(Number(item.startedAt)))]');
+  });
+
+  test("END PROCESS is offered for any inspected session, not only a stale one", () => {
+    // If the desk is where you noticed the session, the desk is where you
+    // should be able to stop it. The old gate hid this behind stale === true,
+    // so a live agent could be inspected but never ended.
+    const end = view.slice(view.indexOf("id: endTag"), view.indexOf("Item { Layout.fillWidth: true }", view.indexOf("id: endTag")));
+    const visible = end.match(/visible: (.+)/)![1];
+    expect(visible).toContain("canEndProcess");
+    expect(visible).not.toContain("stale");
+    // Still two clicks, and the armed state still expires on its own.
+    expect(end).toContain("if (endTag.armed) { view.desk.endProcess(sessionInspector.session)");
+    expect(end).toContain("else endTag.armed = true");
+    expect(end).toContain("Timer { interval: 4000; running: endTag.armed; onTriggered: endTag.armed = false }");
+    // A live session's confirmation names what it is about to kill.
+    expect(end).toContain('"CONFIRM: END "');
+    expect(end).toContain('"END PROCESS"');
   });
 });
 

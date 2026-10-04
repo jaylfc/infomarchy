@@ -3160,12 +3160,22 @@ Item {
           MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (stopTag.armed) { view.desk.stopSession(sessionInspector.session); view.inspectedSession = null } else stopTag.armed = true } }
           Timer { interval: 4000; running: stopTag.armed; onTriggered: stopTag.armed = false }
         }
+        // Any inspected session can be ended from here, not only a stale one:
+        // if the desk is where you noticed it, the desk is where you should be
+        // able to stop it. Still two clicks, still SIGTERM, and stop-session.ts
+        // re-checks that the pid and its start time describe the same agent
+        // process the card did before it signals anything.
         Tag {
           id: endTag
           property bool armed: false
-          visible: !view.desk.canStopSession(sessionInspector.session) && sessionInspector.session.stale === true && view.desk.canEndProcess(sessionInspector.session)
-          text: armed ? "CONFIRM END (SIGTERM)" : "END PROCESS"
-          tone: armed ? view.desk.red : view.desk.yellow
+          readonly property bool live: sessionInspector.session.stale !== true
+          visible: !view.desk.canStopSession(sessionInspector.session) && view.desk.canEndProcess(sessionInspector.session)
+          // A live agent is the one worth being loud about: it says what it is
+          // about to kill rather than a generic confirmation.
+          text: armed
+            ? (endTag.live ? "CONFIRM: END " + String(sessionInspector.session.project || "THIS SESSION").toUpperCase() : "CONFIRM END (SIGTERM)")
+            : "END PROCESS"
+          tone: armed ? view.desk.red : (endTag.live ? view.desk.yellow : view.textDim)
           MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (endTag.armed) { view.desk.endProcess(sessionInspector.session); view.inspectedSession = null } else endTag.armed = true } }
           Timer { interval: 4000; running: endTag.armed; onTriggered: endTag.armed = false }
         }
