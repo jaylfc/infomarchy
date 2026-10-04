@@ -354,6 +354,22 @@ Item {
   function displayTopic(topic) {
     return privacyMode ? "" : String(topic || "")
   }
+  // What a session with no recorded prompts can still say for itself. The old
+  // fallback was the literal string "topic unavailable", which is the card
+  // admitting it has nothing while the snapshot is holding the branch, the
+  // worktree, the process count and the uptime. Facts beat an apology.
+  function sessionFactLine(item) {
+    var s = item || ({}), parts = []
+    var git = s.git || null
+    if (git && git.branch && git.branch !== "(detached)") parts.push(git.branch)
+    else if (s.worktreeId) parts.push("worktree " + String(s.worktreeId).slice(0, 8).toLowerCase())
+    else if (git && git.branch) parts.push("detached head")
+    if (git && git.dirty) parts.push(git.dirty + " changed")
+    var res = s.resources || ({})
+    if (res.processes) parts.push(res.processes + (res.processes === 1 ? " process" : " processes"))
+    if (s.uptimeSec) parts.push("up " + view.desk.dur(s.uptimeSec))
+    return parts.join("  ·  ")
+  }
   function machineHint() {
     var up = "up " + view.desk.dur(view.machine.uptime)
     if (privacyMode) return "privacy · " + up
@@ -1462,7 +1478,8 @@ Item {
                     visible: !sc.grouped
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
-                    text: topicLine.shown ? "↳ " + topicLine.shown : "↳ " + (view.displayTitle((sc.modelData.window || {}).title) || "topic unavailable")
+                    text: topicLine.shown ? "↳ " + topicLine.shown
+                      : "↳ " + (view.displayTitle((sc.modelData.window || {}).title) || view.sessionFactLine(sc.modelData) || "no prompts recorded yet")
                     color: topicLine.shown ? sc.tone : view.textDim
                     font.family: view.mono
                     font.pixelSize: Style.font.bodySmall

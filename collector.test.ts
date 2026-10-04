@@ -373,10 +373,27 @@ describe("live session topics", () => {
     expect(sessions[0].topic).not.toContain(recent[3].text);
   });
 
-  test("uses a generic project summary when exact history is unavailable", () => {
+  test("says nothing rather than inventing a topic when no prompts belong to the session", () => {
+    // This used to answer "Improving Infomarchy": the default verb plus the
+    // directory name. On a worktree named by an id it read "Improving
+    // 01M44FH4T8YW63W98ZCHT8FR2N", which is zero information shaped like a
+    // summary. An empty topic lets the card show the facts it actually holds.
     const sessions = [{ provider: "codex", project: "~/Infomarchy", sessionIds: [] }];
     attachSessionTopics(sessions, [{ provider: "codex", session: "another", ts: 100, text: "wrong session" }]);
-    expect(sessions[0]).toMatchObject({ topic: "Improving Infomarchy", topicAt: 0 });
+    expect(sessions[0]).toMatchObject({ topic: "", topicAt: 0 });
+  });
+
+  test("a topic with no keywords of its own is suppressed, not padded with the project name", () => {
+    const sessions = [{ provider: "claude", project: "01M44FH4T8YW63W98ZCHT8FR2N", session: "f1a1be0e-d056-4a37-915a-38cc5e04bc47", sessionIds: ["f1a1be0e-d056-4a37-915a-38cc5e04bc47"] }];
+    // Only stop-words: nothing survives scoring, so there is nothing to say.
+    attachSessionTopics(sessions, [{ provider: "claude", session: "f1a1be0e-d056-4a37-915a-38cc5e04bc47", ts: 100, text: "please can you just make it work" }]);
+    expect(sessions[0].topic).toBe("");
+  });
+
+  test("a real prompt still produces a real topic", () => {
+    const sessions = [{ provider: "claude", project: "infomarchy", session: "9804b8c2-978c-4b00-960a-dbe56c7ef0d5", sessionIds: ["9804b8c2-978c-4b00-960a-dbe56c7ef0d5"] }];
+    attachSessionTopics(sessions, [{ provider: "claude", session: "9804b8c2-978c-4b00-960a-dbe56c7ef0d5", ts: 100, text: "fix the scrolling in the session cards" }]);
+    expect(sessions[0].topic).toBe("Fixing Infomarchy scrolling sessions");
   });
 
   test("cleans and bounds local-model summaries", () => {

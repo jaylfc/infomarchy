@@ -325,6 +325,32 @@ export function observationalGitEnv(base: NodeJS.Dict<string> | NodeJS.ProcessEn
 export function observationalGitCommand(cwd: string, args: string[]): string[] {
   return ["git", "-C", cwd, ...GIT_OBSERVE_FLAGS, ...args];
 }
+
+// A worktree directory is often named by an id rather than by the project.
+// no-mistakes puts agents in ~/.no-mistakes/worktrees/<repo-hash>/<ULID>, and
+// Orca and git worktrees do their own version of this, so the card's name came
+// out as "01M44FH4T8YW63W98ZCHT8FR2N" and the generated topic then echoed it
+// back as "Improving 01M44FH4T8YW63W98ZCHT8FR2N": a card carrying no
+// information at all. The real name is recoverable, so recover it.
+const OPAQUE_DIR = [
+  /^[0-9A-HJKMNP-TV-Z]{26}$/i,      // ULID (no I, L, O, U)
+  /^[0-9a-f]{8,}$/i,                // hex id, e.g. a worktree hash
+  /^[0-9a-f-]{32,}$/i,              // UUID with dashes
+  /^\d+$/,                          // a bare number
+];
+export function opaqueProjectName(name: string): boolean {
+  const value = String(name || "").trim();
+  if (!value || value.length < 6) return false;
+  return OPAQUE_DIR.some(pattern => pattern.test(value));
+}
+// Last path segment of a remote URL, without .git. Handles both
+// https://host/owner/repo(.git) and git@host:owner/repo(.git).
+export function repoNameFromRemote(url: unknown): string {
+  const raw = String(url || "").trim().replace(/\.git$/, "").replace(/\/+$/, "");
+  if (!raw) return "";
+  const name = raw.split(/[\/:]/).filter(Boolean).pop() || "";
+  return /^[A-Za-z0-9._-]{1,64}$/.test(name) && !opaqueProjectName(name) ? name : "";
+}
 function observationalGit(cwd: string, args: string[], timeoutMs: number): Promise<string> {
   return run(observationalGitCommand(cwd, args), timeoutMs, undefined, observationalGitEnv());
 }
@@ -1121,11 +1147,14 @@ export function linkRecentToLive(recentEntries: any[], sessions: any[]): any[] {
 }
 
 const TOPIC_STOP_WORDS = new Set([
-  "about", "add", "after", "again", "also", "and", "are", "audit", "basically", "been", "being", "build", "can", "cards", "check", "could", "create", "does", "doesnt", "doing", "dont", "fix", "for", "from", "had", "hard", "has", "have", "implement", "in", "into", "is", "it", "its", "just", "last", "little", "make", "more", "need", "needed", "not", "of", "on", "only", "other", "part", "past", "please", "prompt", "prompts", "real", "really", "remove", "review", "screen", "short", "should", "some", "still", "summary", "than", "that", "the", "their", "them", "there", "these", "they", "this", "those", "through", "to", "very", "want", "was", "were", "what", "when", "where", "which", "while", "with", "work", "working", "would", "your"
+  "about", "add", "after", "again", "also", "and", "are", "audit", "basically", "been", "being", "build", "can", "cards", "check", "could", "create", "does", "doesnt", "doing", "dont", "fix", "for", "from", "had", "hard", "has", "have", "implement", "in", "into", "is", "it", "its", "just", "last", "little", "make", "more", "need", "needed", "not", "of", "on", "only", "other", "part", "past", "please", "prompt", "prompts", "real", "really", "remove", "review", "screen", "short", "should", "some", "still", "summary", "than", "that", "the", "their", "them", "there", "these", "they", "this", "those", "through", "to", "very", "want", "was", "were", "what", "when", "where", "which", "while", "with", "work", "working", "would", "you", "your", "yours", "our", "ours", "its", "mine"
 ]);
 
 function topicProjectLabel(session: any): string {
   const raw = String(session.project || session.cwd || "").replace(/\/$/, "").split("/").pop() || "";
+  // A worktree id names nothing, so it must never become the subject of a
+  // sentence about what the agent is doing.
+  if (opaqueProjectName(raw)) return "";
   const clean = raw.split(".").filter(Boolean).pop() || raw;
   return clean && clean !== "~" ? clean.replace(/[-_]+/g, " ").replace(/\b\w/g, c => c.toUpperCase()).replace(/\bAi\b/g, "AI") : "";
 }
@@ -1139,6 +1168,11 @@ function exactSessionEntries(session: any, recentEntries: any[]): any[] {
 }
 
 export function localSessionSummary(session: any, entries: any[]): string {
+  // No prompts recorded for this session means there is nothing to summarise.
+  // Inventing one produced "Improving 01M44FH4T8YW63W98ZCHT8FR2N": the default
+  // verb plus the directory name, which is zero information dressed as a
+  // summary. The card has a factual fallback; give it the chance to use it.
+  if (!entries.length) return "";
   const text = entries.map(entry => String(entry.text || "")).join(" ").toLowerCase();
   const latest = String(entries[0]?.text || "").toLowerCase();
   const action = /\b(summar\w*|synopsis|topic)\b/.test(latest) ? "Summarizing" :
@@ -1161,6 +1195,9 @@ export function localSessionSummary(session: any, entries: any[]): string {
   const projectLower = project.toLowerCase();
   const keywords = [...scores.entries()].filter(([word]) => word !== projectLower)
     .sort((a, b) => b[1] - a[1]).slice(0, 2).map(([word]) => word);
+  // Keywords are what make a topic say something. With none of them the line
+  // degrades to "<verb> <project>", which the card already shows as its title.
+  if (!keywords.length) return "";
   const subject = [project, ...keywords].filter(Boolean).join(" ") || "active session";
   return `${action} ${subject}`.split(/\s+/).slice(0, 7).join(" ").slice(0, 64).trim();
 }
@@ -1406,12 +1443,16 @@ async function githubCiState(cwd: string): Promise<any> {
 
 async function repoState(cwd: string) {
   if (!cwd) return { root: "", state: null, changes: null, ci: null };
-  const [root, status, diff, commitLine, ci] = await Promise.all([
+  const [root, status, diff, commitLine, ci, remote] = await Promise.all([
     observationalGit(cwd, ["rev-parse", "--show-toplevel"], 700),
     observationalGit(cwd, ["status", "--porcelain=v2", "--branch"], 900),
     observationalGit(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--numstat", "HEAD", "--"], 900),
     observationalGit(cwd, ["log", "-1", "--format=%H%x09%h%x09%ct%x09%s"], 700),
     githubCiState(cwd),
+    // Only asked for, and only used, when the directory name is an opaque id.
+    // A worktree shares its config with the repo it came from, so this answers
+    // even for a bare .git the operator never sees.
+    opaqueProjectName(basename(cwd)) ? observationalGit(cwd, ["config", "--get", "remote.origin.url"], 700) : Promise.resolve(""),
   ]);
   const state = parseGitStatus(status), stats = parseDiffNumstat(diff), commit = parseCommitSummary(commitLine);
   // Status and numstat cannot tell one edit from another edit of the same
@@ -1419,7 +1460,7 @@ async function repoState(cwd: string) {
   const stamps = (state?.files || []).slice(0, 12).map(file => { try { return lstatSync(join(root.trim() || cwd, file)).mtimeMs; } catch { return 0; } });
   const fingerprint = String(Bun.hash(JSON.stringify([commit?.hash || "", status, diff, stamps])));
   return {
-    root: root.trim(), state,
+    root: root.trim(), state, remoteName: repoNameFromRemote(remote),
     changes: state || commit ? {
       fingerprint,
       count: state?.dirty || 0,
@@ -1810,7 +1851,7 @@ async function liveSessions(pids: number[]) {
   // sessions beyond the cap simply show no repo state rather than spawning
   // hundreds of processes per tick.
   const MAX_REPOS_PER_TICK = 24;
-  const repos = new Map<string, Promise<{ root: string; state: any; changes: any; ci: any }>>();
+  const repos = new Map<string, Promise<{ root: string; state: any; changes: any; ci: any; remoteName: string }>>();
   for (const session of sessions) {
     if (!session._cwd || repos.has(session._cwd)) continue;
     if (repos.size >= MAX_REPOS_PER_TICK) break;
@@ -1819,6 +1860,17 @@ async function liveSessions(pids: number[]) {
   await Promise.all(sessions.map(async session => {
     const repo = session._cwd ? await repos.get(session._cwd) : null;
     session.repoRoot = repo?.root ? shortPath(repo.root) : "";
+    // An agent working in ~/.no-mistakes/worktrees/<hash>/<ULID> was labelled
+    // with the ULID, which names nothing. Prefer the repo the worktree came
+    // from and keep the id as detail, so the card says what the work is about
+    // and the inspector can still say exactly which worktree it is.
+    if (opaqueProjectName(session.project)) {
+      const resolved = repo?.remoteName || (repo?.root ? basename(repo.root) : "");
+      if (resolved && !opaqueProjectName(resolved)) {
+        session.worktreeId = session.project;
+        session.project = resolved;
+      }
+    }
     session.git = repo?.state || null;
     session.changes = repo?.changes || null;
     session.ci = repo?.ci || null;

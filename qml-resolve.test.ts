@@ -66,7 +66,9 @@ const CEILINGS: Record<string, number> = {
   // +2: the inspector's CLOSE tag reads view.desk and view.textDim from the
   // outer scope for its hover tint, the same unqualified false positive the
   // rest of this count is made of.
-  "InfoView.qml": 611,
+  // +1: sessionFactLine() reads view.desk for the duration formatter, the
+  // same outer-scope false positive as every other helper in this file.
+  "InfoView.qml": 612,
   "Overlay.qml": 29,
   "WaveWallpaper.qml": 0,
   // Settings drawer (#25): dynamic Style properties qmllint sees as QObject,
