@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face { font-family: "JBM"; src: url("file:///usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "JBM"; src: url("file:///usr/share/fonts/TTF/JetBrainsMonoNerdFont-Bold.ttf"); font-weight: 700; }
+  @font-face { font-family: "JBM"; src: url("file:///usr/share/fonts/TTF/JetBrainsMonoNerdFont-ExtraBold.ttf"); font-weight: 800; }
+  :root {
+    --bg: #04060b;
+    --panel: rgba(10, 18, 30, 0.82);
+    --line: rgba(0, 240, 255, 0.22);
+    --fg: #e4f3ff;
+    --dim: #6c8aa6;
+    --cyan: #00f0ff;
+    --mag: #ff2bd6;
+    --acid: #39ff88;
+    --amber: #ffb340;
+    --ch: 16px;
+    --chs: 9px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1600px; height: 900px; }
+  body { background: var(--bg); font-family: "JBM", monospace; color: var(--fg); position: relative; overflow: hidden; }
+
+  /* atmosphere */
+  .grid { position: absolute; inset: 0;
+    background-image: linear-gradient(rgba(0,240,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(0,240,255,.05) 1px, transparent 1px);
+    background-size: 40px 40px; }
+  .horizon { position: absolute; left: -10%; right: -10%; bottom: -120px; height: 420px;
+    background-image: linear-gradient(rgba(255,43,214,.20) 1px, transparent 1px), linear-gradient(90deg, rgba(255,43,214,.20) 1px, transparent 1px);
+    background-size: 64px 40px; transform: perspective(500px) rotateX(62deg); transform-origin: bottom; opacity: .55; }
+  .glow1 { position: absolute; width: 900px; height: 900px; border-radius: 50%; top: -420px; left: -260px;
+    background: radial-gradient(circle, rgba(0,240,255,.20), transparent 62%); }
+  .glow2 { position: absolute; width: 900px; height: 900px; border-radius: 50%; bottom: -480px; right: -220px;
+    background: radial-gradient(circle, rgba(255,43,214,.22), transparent 62%); }
+  .scan { position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,.028) 0 1px, transparent 1px 3px); }
+
+  .chamfer { clip-path: polygon(var(--ch) 0, 100% 0, 100% calc(100% - var(--ch)), calc(100% - var(--ch)) 100%, 0 100%, 0 var(--ch)); }
+  .chamfer-s { clip-path: polygon(var(--chs) 0, 100% 0, 100% calc(100% - var(--chs)), calc(100% - var(--chs)) 100%, 0 100%, 0 var(--chs)); }
+
+  .wrap { position: relative; padding: 44px 56px 38px; height: 100%; display: grid; grid-template-columns: 1fr 640px; grid-template-rows: auto auto 1fr auto; column-gap: 36px; row-gap: 22px; }
+
+  /* header */
+  .head { grid-column: 1 / -1; display: flex; align-items: flex-end; justify-content: space-between; }
+  .kicker { font-size: 18px; letter-spacing: 6px; color: var(--mag); text-shadow: 0 0 14px rgba(255,43,214,.6); }
+  .title { font-size: 92px; font-weight: 800; letter-spacing: 8px; line-height: .95; margin-top: 8px;
+    color: var(--fg); text-shadow: 0 0 22px rgba(0,240,255,.55), 0 0 2px #fff; }
+  .title b { color: var(--cyan); font-weight: 800; }
+  .since { text-align: right; }
+  .since .big { font-size: 64px; font-weight: 800; color: var(--acid); text-shadow: 0 0 20px rgba(57,255,136,.55); line-height: 1; }
+  .since .lbl { font-size: 15px; letter-spacing: 3px; color: var(--dim); margin-top: 8px; }
+  .since .lbl em { color: var(--fg); font-style: normal; }
+
+  /* stats */
+  .stats { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); padding: 16px 18px 15px; position: relative; }
+  .stat .n { font-size: 46px; font-weight: 800; line-height: 1; }
+  .stat .k { font-size: 13px; letter-spacing: 3px; color: var(--dim); margin-top: 9px; }
+  .stat .bar { position: absolute; left: 0; bottom: 0; height: 3px; }
+
+  /* thank-you wall */
+  .wall { background: var(--panel); border: 1px solid rgba(255,43,214,.35); padding: 22px 26px 20px; position: relative; display: flex; flex-direction: column; }
+  .wall h2 { font-size: 34px; font-weight: 800; letter-spacing: 6px; color: var(--mag); text-shadow: 0 0 18px rgba(255,43,214,.6); }
+  .wall .sub { font-size: 14px; color: var(--dim); letter-spacing: 1.5px; margin-top: 6px; }
+  .names { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 16px 26px; margin-top: 24px; }
+  .nm { color: var(--fg); font-weight: 700; display: inline-flex; align-items: baseline; gap: 8px; }
+  .nm i { font-style: normal; font-size: 15px; color: var(--dim); font-weight: 400; }
+  .nm.new { color: var(--acid); text-shadow: 0 0 12px rgba(57,255,136,.45); }
+  .nm.new i { color: var(--acid); opacity: .75; }
+  .legend { margin-top: auto; padding-top: 14px; font-size: 13px; color: var(--dim); letter-spacing: 1px; }
+  .legend b { color: var(--acid); font-weight: 700; }
+
+  /* shipped */
+  .ship { background: var(--panel); border: 1px solid var(--line); padding: 20px 22px 16px; }
+  .ship h3 { font-size: 15px; letter-spacing: 5px; color: var(--cyan); margin-bottom: 12px; }
+  .row { display: grid; grid-template-columns: 10px 1fr auto; gap: 12px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid rgba(0,240,255,.09); }
+  .row:last-child { border-bottom: 0; }
+  .row .dot { width: 8px; height: 8px; transform: translateY(-1px); }
+  .row .t { font-size: 18px; font-weight: 700; }
+  .row .t span { display: block; font-size: 13px; color: var(--dim); font-weight: 400; margin-top: 3px; }
+  .row .w { font-size: 13px; color: var(--mag); letter-spacing: 1px; white-space: nowrap; }
+  .row .w.us { color: var(--dim); }
+
+  .foot { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; }
+  .url { font-size: 22px; letter-spacing: 1px; }
+  .url b { color: var(--cyan); }
+  .chips { display: flex; gap: 10px; }
+  .chip { font-size: 13px; letter-spacing: 2.5px; padding: 8px 14px 9px; border: 1px solid var(--line); color: var(--dim); background: rgba(0,0,0,.35); }
+</style>
+</head>
+<body>
+  <div class="grid"></div><div class="horizon"></div><div class="glow1"></div><div class="glow2"></div>
+
+  <div class="wrap">
+    <div class="head">
+      <div>
+        <div class="kicker">OMARCHY PLUGIN · UPDATE 2026-10-04</div>
+        <div class="title">INFO<b>MARCHY</b></div>
+      </div>
+      <div class="since">
+        <div class="big">+47</div>
+        <div class="lbl">COMMITS IN <em>8 DAYS</em> · <em>+8,154</em> LINES</div>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat chamfer-s"><div class="n" style="color:var(--amber)">121</div><div class="k">STARS</div><div class="bar" style="width:100%;background:var(--amber);box-shadow:0 0 10px var(--amber)"></div></div>
+      <div class="stat chamfer-s"><div class="n" style="color:var(--cyan)">23</div><div class="k">FORKS</div><div class="bar" style="width:100%;background:var(--cyan);box-shadow:0 0 10px var(--cyan)"></div></div>
+      <div class="stat chamfer-s"><div class="n" style="color:var(--mag)">14</div><div class="k">CONTRIBUTORS</div><div class="bar" style="width:100%;background:var(--mag);box-shadow:0 0 10px var(--mag)"></div></div>
+      <div class="stat chamfer-s"><div class="n" style="color:var(--acid)">39</div><div class="k">PRS MERGED</div><div class="bar" style="width:100%;background:var(--acid);box-shadow:0 0 10px var(--acid)"></div></div>
+      <div class="stat chamfer-s"><div class="n">603</div><div class="k">TESTS PASSING</div><div class="bar" style="width:100%;background:var(--fg);box-shadow:0 0 10px var(--fg)"></div></div>
+      <div class="stat chamfer-s"><div class="n">6 WK</div><div class="k">SINCE DAY ONE</div><div class="bar" style="width:100%;background:var(--dim)"></div></div>
+    </div>
+
+    <div class="wall chamfer">
+      <h2>THANK YOU</h2>
+      <div class="sub">EVERY PERSON WHO SENT A PULL REQUEST · SIZED BY PRS MERGED</div>
+      <div class="names">
+        <span class="nm new" style="font-size:66px">TechLuddite<i>9</i></span>
+        <span class="nm new" style="font-size:36px">Wulf Kaal<i>2</i></span>
+        <span class="nm" style="font-size:36px">Augie Bralley<i>2</i></span>
+        <span class="nm" style="font-size:36px">Reverb<i>2</i></span>
+        <span class="nm" style="font-size:36px">Tech0001<i>2</i></span>
+        <span class="nm" style="font-size:36px">Adam<i>2</i></span>
+        <span class="nm" style="font-size:36px">jaylfc<i>2</i></span>
+        <span class="nm" style="font-size:36px">jttraino<i>2</i></span>
+        <span class="nm new" style="font-size:29px">Greyforge Labs<i>1</i></span>
+        <span class="nm" style="font-size:29px">RidgetopAi<i>1</i></span>
+        <span class="nm" style="font-size:29px">Danny Welch<i>1</i></span>
+        <span class="nm" style="font-size:29px">Casey Shields<i>1</i></span>
+        <span class="nm" style="font-size:29px">Greg<i>1</i></span>
+        <span class="nm" style="font-size:29px">sooners0<i>1</i></span>
+      </div>
+      <div class="legend"><b>GREEN</b> = SHIPPED IN THIS UPDATE</div>
+    </div>
+
+    <div class="ship chamfer">
+      <h3>NEW SINCE THE LAST UPDATE</h3>
+      <div class="row"><div class="dot" style="background:var(--mag);box-shadow:0 0 8px var(--mag)"></div><div class="t">Web Mode<span>the desk in a browser · Tailscale or HTTPS</span></div><div class="w">TechLuddite</div></div>
+      <div class="row"><div class="dot" style="background:var(--mag);box-shadow:0 0 8px var(--mag)"></div><div class="t">HARD REFRESH + Grok usage<span>opt-in billing · never spends on its own</span></div><div class="w">TechLuddite</div></div>
+      <div class="row"><div class="dot" style="background:var(--mag);box-shadow:0 0 8px var(--mag)"></div><div class="t">REMOTE roster card<span>agents on machines you can't see</span></div><div class="w">Wulf Kaal</div></div>
+      <div class="row"><div class="dot" style="background:var(--mag);box-shadow:0 0 8px var(--mag)"></div><div class="t">DISK paths with spaces<span>mounts that used to vanish</span></div><div class="w">Greyforge Labs</div></div>
+      <div class="row"><div class="dot" style="background:var(--cyan);box-shadow:0 0 8px var(--cyan)"></div><div class="t">Click into Orca tabs + Herdr panes<span>every agent card jumps where it lives</span></div><div class="w us">Larry + Fred</div></div>
+      <div class="row"><div class="dot" style="background:var(--cyan);box-shadow:0 0 8px var(--cyan)"></div><div class="t">Kill a session from its card<span>two clicks · verified pid · SIGTERM</span></div><div class="w us">Larry + Fred</div></div>
+      <div class="row"><div class="dot" style="background:var(--cyan);box-shadow:0 0 8px var(--cyan)"></div><div class="t">TERMINAL vs WORKER BEE sort<span>real project names · no made-up summaries</span></div><div class="w us">Larry + Fred</div></div>
+    </div>
+
+    <div class="foot">
+      <div class="url">github.com/<b>nixfred/infomarchy</b></div>
+      <div class="chips">
+        <div class="chip chamfer-s">MIT</div>
+        <div class="chip chamfer-s">BUILT ON OMARCHY</div>
+        <div class="chip chamfer-s">LOCAL-FIRST</div>
+      </div>
+    </div>
+  </div>
+  <div class="scan"></div>
+</body>
+</html>

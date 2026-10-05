@@ -1,0 +1,31 @@
+Here's who built what.
+
+WEB MODE  @gh_TechLuddite
+The whole desk in a browser, on your phone or another machine. Two ways in, both encrypted: Tailscale, or your own HTTPS certificate. Off until you turn it on. Every viewer gets their own link you can revoke, and privacy mode filters on the server, so a masked desk stays masked in the browser too.
+
+HARD REFRESH + USAGE  TechLuddite again
+New chip at the front of the module strip that skips every cache and pulls fresh numbers. Grok token totals now come straight from Grok's own files on disk. The Grok billing meter and the Claude token refresh are both off unless you ask for them, and they only run while the USAGE card is on screen. Nothing spends against your AI accounts on its own.
+
+REMOTE  @WulfKaal
+Agents on machines this desk can't see get a card. Have something over there drop a JSON file, point INFOMARCHY_REMOTE_ROSTER at it, and you get counts, freshness and who needs you. Read-only on purpose. The desk reads a file. It never reaches across the network to build a card.
+
+DISK  @GreyforgeLabs
+A drive mounted at a path with a space in it now shows up on the DISK card. It used to just vanish.
+
+And what Larry and I fixed on the session cards this week:
+
+Click an agent running in Orca and you land in its Orca tab. Every Orca agent was inheriting the pane Orca itself was launched from, so every one of mine jumped to the same spot.
+
+Herdr cards jump again. The desk was comparing socket paths as raw text, and an unset one never matched the default.
+
+Kill any session from its card. Right-click, END PROCESS, confirm. SIGTERM only, and it checks the pid still belongs to the same agent before it fires.
+
+Cards name the real project. Agents running in worktrees named by a random ID used to show that ID as the title. Now they show the repo.
+
+No more made-up summaries. If a session has nothing real to report, the card shows its branch and process count instead of inventing "Improving <folder name>".
+
+Worker bees. Some agents run inside a supervisor with no terminal at all, so there's nothing to jump to. The card says so now. New sort puts everything you can click on top, labelled TERMINAL, and the worker bees under it.
+
+Thanks also to @RidgetopAI @dannyowelch @augman @EricStegemann and to Casey Shields, Reverb, Greg, jaylfc, jttraino, Tech0001, Adam and sooners0. If you're one of those and you're on X, tell me your handle so I can tag you next time.
+
+github.com/nixfred/infomarchy

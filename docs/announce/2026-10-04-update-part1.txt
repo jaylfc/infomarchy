@@ -1,0 +1,17 @@
+Infomarchy just got a big one. 🔥
+
+Your Omarchy desk can now live in a browser on your phone. It tells you which of your agents you can actually click into and which ones are worker bees nobody can reach. Click an agent running in Orca and you land in its Orca tab. Kill any session straight from its card. And agents running on boxes you can't even see get their own card now.
+
+47 commits in 8 days, with pull requests from 3 contributors.
+
+None of this exists without the people who keep sending PRs to a plugin I started 6 weeks ago:
+
+TechLuddite, Wulf Kaal, Greyforge Labs, RidgetopAi, Danny Welch, Augie Bralley, Casey Shields, Reverb, Greg, jaylfc, jttraino, Tech0001, Adam, sooners0
+
+14 contributors. 39 pull requests merged. 121 stars. 23 forks. 603 tests.
+
+THANK YOU. Every one of you made this better than I would have on my own.
+
+All the details and who built what in the reply 👇
+
+github.com/nixfred/infomarchy
