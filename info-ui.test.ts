@@ -317,12 +317,12 @@ describe("right column fits a 1080p desk", () => {
   test("a busy desk shrinks its session cards instead of burying everything below them", () => {
     // 25 sessions at six columns was five rows of eight-line cards — the whole
     // screen, with no ACTIVITY, RECENT TASKS or ops cards under it.
-    expect(view).toContain("readonly property bool dense: view.visibleSessions.length > 8");
+    expect(view).toContain("readonly property bool dense: view.sortedSessions.length > 8");
 
     // Columns bound the number of ROWS, because rows are what push the desk off.
     const columns = view.match(/readonly property int targetColumns: dense[\s\S]*?\n              : [^\n]*/)?.[0];
     expect(columns).toBeTruthy();
-    expect(columns).toContain("Math.ceil(view.visibleSessions.length / 4)");
+    expect(columns).toContain("Math.ceil(view.sortedSessions.length / 4)");
 
     const density = (n: number) => Math.max(6, Math.min(8, Math.ceil(n / 4)));
     // Measured on a real desk: left column 1327, card padding 13, gap 11.
@@ -531,9 +531,13 @@ describe("an idle session drops off the desk and comes back on its own", () => {
     expect(view).toContain("if (!settings.hideQuietSessions) return displaySessions");
     // The render path, the keyboard walk and the density maths must all agree
     // on the same list, or Enter focuses a card nobody can see.
-    expect(view).toContain("model: view.visibleSessions");
-    expect(view).toContain("var session = visibleSessions[keyboardSessionIndex]");
-    expect(view).toContain("readonly property bool dense: view.visibleSessions.length > 8");
+    // sortedSessions IS visibleSessions in recency order and a regrouping of
+    // it in "terminal" order: same cards, different sequence. Everything that
+    // draws, measures or navigates must use the rendered list, or the keyboard
+    // index points at a different card than the one under it.
+    expect(view).toContain("model: view.sortedSessions");
+    expect(view).toContain("var session = sortedSessions[keyboardSessionIndex]");
+    expect(view).toContain("readonly property bool dense: view.sortedSessions.length > 8");
     expect(view).not.toContain("model: view.displaySessions");
   });
 
@@ -1054,18 +1058,20 @@ describe("quiet sessions group into one card per provider", () => {
 
   test("the desk draws, measures and navigates the list it renders, not the raw one", () => {
     // Drawing one list while sizing from another would leave the desk dense for
-    // cards it no longer draws — which is the whole problem. The rendered list
-    // is now displaySessions with quiet ones dropped, so every consumer moved
-    // to visibleSessions together.
-    expect(view).toContain("model: view.visibleSessions");
-    expect(view).toContain("readonly property bool dense: view.visibleSessions.length > 8");
-    expect(view).toContain("Math.ceil(view.visibleSessions.length / 4)");
-    expect(view).toContain("Math.max(4, Math.min(6, view.visibleSessions.length))");
-    expect(view).toContain("dense ? 112 : view.visibleSessions.length > 4 ? 150 : 210");
+    // cards it no longer draws, which is the whole problem. The rendered list
+    // is sortedSessions: visibleSessions in recency order, or a regrouping of
+    // it in "terminal" order. Same cards, different sequence, so every
+    // consumer has to move together or the keyboard index and the measured
+    // density describe a list nobody is looking at.
+    expect(view).toContain("model: view.sortedSessions");
+    expect(view).toContain("readonly property bool dense: view.sortedSessions.length > 8");
+    expect(view).toContain("Math.ceil(view.sortedSessions.length / 4)");
+    expect(view).toContain("Math.max(4, Math.min(6, view.sortedSessions.length))");
+    expect(view).toContain("dense ? 112 : view.sortedSessions.length > 4 ? 150 : 210");
     // The delegate rings the card whose index matches, so J/K has to walk the
     // same list the Repeater does or the ring lands on the wrong card.
-    expect(view).toContain("keyboardSessionIndex = (keyboardSessionIndex + Number(delta) + visibleSessions.length) % visibleSessions.length");
-    expect(view).toContain("var session = visibleSessions[keyboardSessionIndex]");
+    expect(view).toContain("keyboardSessionIndex = (keyboardSessionIndex + Number(delta) + sortedSessions.length) % sortedSessions.length");
+    expect(view).toContain("var session = sortedSessions[keyboardSessionIndex]");
     expect(view).not.toContain("model: view.sessions\n");
   });
 
@@ -1281,7 +1287,8 @@ describe("external roster presentation", () => {
     const evaluate = (source: string, fixture: any, extra = {}) => Function("view", "Style", ...Object.keys(extra), `return ${source}`)(fixture, { fontScale: 1 }, ...Object.values(extra));
     const fixture = { width: 1920, height: 1080, gap: 12, sessions: Array.from({ length: 9 }, (_, id) => ({ id })), ai: {}, sectionEnabled: () => true };
     function layout(ai: any) {
-      const v = { ...fixture, ai, visibleSessions: fixture.sessions };
+      // The Flow sizes from the RENDERED list, which is sortedSessions.
+      const v = { ...fixture, ai, visibleSessions: fixture.sessions, sortedSessions: fixture.sessions };
       const rightColumnWidth = evaluate(expr(/rightColumnWidth: (.+)/), v, { width: v.width });
       // dense and targetColumns became multi-line bindings after this PR was
       // written; read both from source so the differential still compares what

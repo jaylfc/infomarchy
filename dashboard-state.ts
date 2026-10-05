@@ -26,6 +26,9 @@ function validPatch(patch: any): boolean {
     if (STRINGS.includes(key)) return typeof value === "string" && value.length <= 2048;
     if (ORDERS.includes(key)) return Array.isArray(value) && value.length <= 16 && value.every(v => typeof v === "string" && /^[a-zA-Z]+$/.test(v));
     if (key === "webAccessMode") return value === "tailscale" || value === "manual";
+    // An enum, not a free string: an unknown sort would load as a mode the
+    // desk has no ordering for.
+    if (key === "sessionSort") return value === "recent" || value === "terminal";
     if (key === "quietStartHour" || key === "quietEndHour") return Number.isInteger(value) && value >= 0 && value <= 23;
     if (key === "sessionQuietMinutes") return Number.isInteger(value) && value >= 0 && value <= 10080;
     if (key === "deskWorkspace") return Number.isInteger(value) && value >= 0 && value <= 999;

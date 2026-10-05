@@ -59,6 +59,13 @@ Item {
   // explicitly asked to group keeps its group card, since asking to group it is
   // asking to keep seeing it.
   property bool hideQuietSessions: true
+  // How the SESSIONS card orders its cards. "recent" is newest first, which
+  // is what the desk has always done. "terminal" keeps every card but puts
+  // the ones you can actually click first, and the supervisor-run workers
+  // after them: a card you cannot jump to is a different kind of thing from
+  // one you can, and mixing them makes the clickable ones hard to find.
+  property string sessionSort: "recent"
+  readonly property var sessionSorts: ["recent", "terminal"]
   // Which workspace the desk is drawn on. The background layer itself is
   // per-output and has no workspace of its own, so this gates the cards only:
   // the wallpaper keeps rendering everywhere, exactly as it does now. 0 is
@@ -139,6 +146,7 @@ Item {
       sessionGroups = parsed && parsed.sessionGroups && typeof parsed.sessionGroups === "object" ? parsed.sessionGroups : ({})
       sessionQuietMinutes = parsed && Number.isInteger(parsed.sessionQuietMinutes) ? Math.max(0, Math.min(10080, parsed.sessionQuietMinutes)) : 60
       hideQuietSessions = !parsed || parsed.hideQuietSessions !== false
+      sessionSort = parsed && sessionSorts.indexOf(String(parsed.sessionSort)) >= 0 ? String(parsed.sessionSort) : "recent"
       deskWorkspace = parsed && Number.isInteger(parsed.deskWorkspace) ? Math.max(0, Math.min(maxWorkspace, parsed.deskWorkspace)) : 0
       videoAudio = !!(parsed && parsed.videoAudio === true)
       quietHoursEnabled = !!(parsed && parsed.quietHoursEnabled === true)
@@ -179,6 +187,7 @@ Item {
       sessionGroups = ({})
       sessionQuietMinutes = 60
       hideQuietSessions = true
+      sessionSort = "recent"
       deskWorkspace = 0
       videoAudio = false
       quietHoursEnabled = false
@@ -345,6 +354,14 @@ Item {
   }
   function toggleSessionGroup(provider) { return setSessionGroup(provider, !sessionGroupEnabled(provider)) }
   function setHideQuietSessions(enabled) { hideQuietSessions = !!enabled; persist({ hideQuietSessions: hideQuietSessions }) }
+  function setSessionSort(mode) {
+    var value = String(mode || "")
+    if (sessionSorts.indexOf(value) < 0) return false
+    sessionSort = value
+    persist({ sessionSort: sessionSort })
+    return true
+  }
+  function cycleSessionSort() { setSessionSort(sessionSort === "recent" ? "terminal" : "recent") }
   function toggleHideQuietSessions() { setHideQuietSessions(!hideQuietSessions) }
   // Hyprland's named/special workspaces carry negative ids (olrec is -1337);
   // those are not places the desk belongs, so only ordinary positive ids and

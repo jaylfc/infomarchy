@@ -62,3 +62,46 @@ describe("a supervisor-run agent is named, not silently unclickable", () => {
     expect(sessionHostsFromEnvironment("")).toEqual([]);
   });
 });
+
+describe("the terminal sort groups the desk without losing a card", () => {
+  test("sortedSessions keeps every card and only changes the order", () => {
+    const sorted = view.match(/readonly property var sortedSessions: \{[\s\S]*?\n  \}/)![0];
+    // Recency order is untouched unless the mode is asked for.
+    expect(sorted).toContain('if (settings.sessionSort !== "terminal") return visibleSessions');
+    // Concat, not filter: nothing is dropped, which is the point of "keep all
+    // the cards where they are".
+    expect(sorted).toContain("return reachable.concat(workers)");
+    expect(sorted).not.toContain("slice(");
+  });
+
+  test("the sort and the click agree, because both ask sessionReachable", () => {
+    const reach = view.match(/function sessionReachable\(item\)[\s\S]*?\n  \}/)![0];
+    for (const kind of ["orca", "herdr", "boomux", "background", "daemon"]) expect(reach).toContain(kind);
+    const sorted = view.match(/readonly property var sortedSessions: \{[\s\S]*?\n  \}/)![0];
+    expect(sorted).toContain("sessionReachable(");
+    // A disagreement here is the bug this whole group of changes is about: a
+    // card sorted as clickable that ignores clicks.
+    const hint = view.match(/function jumpHint\(item\)[\s\S]*?\n  \}/)![0];
+    expect(hint).toContain("no terminal to jump to");
+  });
+
+  test("each card is labelled, and only in the mode where the label means something", () => {
+    const chip = view.slice(view.indexOf('readonly property bool reachable: view.sessionReachable(sc.modelData)'));
+    expect(chip).toContain('visible: view.settings.sessionSort === "terminal"');
+    expect(chip).toContain('text: reachable ? "TERMINAL" : "WORKER BEE"');
+  });
+
+  test("the mode is persisted as an enum and reachable over IPC", () => {
+    const settings = readFileSync(join(import.meta.dir, "InfoSettings.qml"), "utf8");
+    const service = readFileSync(join(import.meta.dir, "Infomarchy.qml"), "utf8");
+    const state = readFileSync(join(import.meta.dir, "dashboard-state.ts"), "utf8");
+    expect(settings).toContain('property string sessionSort: "recent"');
+    expect(settings).toContain('readonly property var sessionSorts: ["recent", "terminal"]');
+    expect(settings).toContain("persist({ sessionSort: sessionSort })");
+    expect(service).toContain("function setSessionSort(v: string): string");
+    expect(service).toContain("function toggleSessionSort(): void");
+    // The patch writer validates it as an enum, so an unknown mode cannot be
+    // persisted into a sort the desk has no ordering for.
+    expect(state).toContain('if (key === "sessionSort") return value === "recent" || value === "terminal";');
+  });
+});

@@ -162,6 +162,22 @@ Item {
     }
     return result
   }
+  // "terminal" sort keeps every card and only changes the order: the ones a
+  // click can reach first, then the supervisor-run workers. Each group holds
+  // its existing recency order, so this regroups without reshuffling.
+  readonly property var sortedSessions: {
+    if (settings.sessionSort !== "terminal") return visibleSessions
+    var reachable = [], workers = []
+    for (var i = 0; i < visibleSessions.length; i++)
+      (sessionReachable(visibleSessions[i]) ? reachable : workers).push(visibleSessions[i])
+    return reachable.concat(workers)
+  }
+  readonly property int reachableSessionCount: {
+    var total = 0
+    for (var i = 0; i < visibleSessions.length; i++) if (sessionReachable(visibleSessions[i])) total++
+    return total
+  }
+  readonly property int workerSessionCount: visibleSessions.length - reachableSessionCount
   // Never let the desk quietly under-report the machine: whatever the rule
   // drops is counted and named in the card hint.
   readonly property int hiddenQuietCount: displaySessions.length - visibleSessions.length
@@ -362,6 +378,21 @@ Item {
   // and no reachable host cannot be jumped to at all: it was started by a
   // supervisor, has no controlling terminal, and its output goes down a pipe
   // to its parent. Saying so beats a card that silently ignores every click.
+  // Can a click on this card land anywhere? The jump hint and the sort must
+  // never disagree, so both read this.
+  function sessionReachable(item) {
+    var s = item || ({}), hosts = s.hosts || []
+    if (s.window) return true
+    return hosts.some(function(h) {
+      if (!h) return false
+      if (h.kind === "orca") return !!h.handle
+      if (h.kind === "herdr") return true
+      if (h.kind === "boomux") return !!h.shellId
+      if (h.kind === "background") return !!h.attachId
+      if (h.kind === "daemon") return !!h.attach
+      return false
+    })
+  }
   function jumpHint(item) {
     var s = item || ({}), hosts = s.hosts || []
     var has = function(kind) { return hosts.some(function(h) { return h && h.kind === kind }) }
@@ -571,11 +602,11 @@ Item {
   // `index` against keyboardSessionIndex, so stepping through anything other
   // than the rendered list would put the highlight ring on the wrong card.
   function keyboardStep(delta) {
-    if (!visibleSessions.length) { keyboardSessionIndex = -1; return }
-    keyboardSessionIndex = (keyboardSessionIndex + Number(delta) + visibleSessions.length) % visibleSessions.length
+    if (!sortedSessions.length) { keyboardSessionIndex = -1; return }
+    keyboardSessionIndex = (keyboardSessionIndex + Number(delta) + sortedSessions.length) % sortedSessions.length
   }
   function activateKeyboardSession() {
-    var session = visibleSessions[keyboardSessionIndex]
+    var session = sortedSessions[keyboardSessionIndex]
     if (session && session.window && session.window.address) navigateTo(session.window.address)
   }
   // inspectedSession/selectedPrompt hold a copy of the delegate's modelData from
@@ -1311,6 +1342,9 @@ Item {
                 + (view.hiddenQuietCount ? " · " + view.hiddenQuietCount + " idle over "
                     + view.settings.sessionQuietMinutes + "m hidden" : "")
                 + " · left focus · right inspect"
+                + (view.settings.sessionSort === "terminal"
+                    ? " · sorted: " + view.reachableSessionCount + " on a terminal, then " + view.workerSessionCount + " worker bees"
+                    : "")
                 + (view.groupableProviders.length ? " · ▴▾ next to an agent name groups it" : "")
                 + (view.desk.error ? " · ⚠ " + view.desk.error : "")
           Flow {
@@ -1326,21 +1360,21 @@ Item {
             // ops cards are the reason the desk exists, so the session cards are
             // the ones that give way. Dense mode narrows them and drops the
             // lines a glance does not need — the inspector still has all of it.
-            readonly property bool dense: view.visibleSessions.length > 8
+            readonly property bool dense: view.sortedSessions.length > 8
             // Columns are chosen to bound the number of ROWS, since rows are
             // what push the desk off the screen. Fewest columns that keep it to
             // about four, so the cards stay as wide as that allows.
             readonly property int targetColumns: dense
-              ? Math.max(6, Math.min(8, Math.ceil(view.visibleSessions.length / 4)))
-              : Math.max(4, Math.min(6, view.visibleSessions.length))
+              ? Math.max(6, Math.min(8, Math.ceil(view.sortedSessions.length / 4)))
+              : Math.max(4, Math.min(6, view.sortedSessions.length))
             // Measured, not guessed: this is multiplied by fontScale, and a
             // dense minimum of 138 came out at 184 on a 1.33 desk — wider than
             // the fitted width, so Flow fell back to six per row and the extra
             // columns bought nothing. 112 leaves eight columns reachable.
-            readonly property int minimumCardWidth: Math.round((dense ? 112 : view.visibleSessions.length > 4 ? 150 : 210) * Style.fontScale)
+            readonly property int minimumCardWidth: Math.round((dense ? 112 : view.sortedSessions.length > 4 ? 150 : 210) * Style.fontScale)
             readonly property int fittedCardWidth: Math.floor((width - spacing * (targetColumns - 1)) / targetColumns)
             Repeater {
-              model: view.visibleSessions
+              model: view.sortedSessions
               delegate: Rectangle {
                 id: sc
                 required property var modelData
@@ -1462,6 +1496,19 @@ Item {
                           mouse.accepted = true
                         }
                       }
+                    }
+                    // Which half of the "terminal" sort this card is in. Shown
+                    // only in that mode, because in recency order the groups
+                    // are interleaved and the chip would be noise on every
+                    // card rather than a heading for a block of them.
+                    Tag {
+                      readonly property bool reachable: view.sessionReachable(sc.modelData)
+                      visible: view.settings.sessionSort === "terminal" && !sc.grouped
+                      text: reachable ? "TERMINAL" : "WORKER BEE"
+                      tone: reachable ? view.desk.green : view.textFaint
+                      Layout.minimumWidth: 0
+                      Layout.preferredWidth: implicitWidth
+                      Layout.maximumWidth: implicitWidth
                     }
                     // Unattended and idle for hours: probably a zombie. Right-click → inspector → STOP / END.
                     // Fill-and-cap: a non-fill Tag keeps its implicit width and paints into the next card.

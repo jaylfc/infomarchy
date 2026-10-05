@@ -70,7 +70,10 @@ const CEILINGS: Record<string, number> = {
   // same outer-scope false positive as every other helper in this file.
   // +1: jumpHint() reads the session's hosts through the outer scope, the
   // same unqualified false positive as every other helper here.
-  "InfoView.qml": 613,
+  // +4: sessionReachable(), sortedSessions and the two group counts read the
+  // session list and view.settings through the outer scope, the same
+  // unqualified false positive the rest of this count is made of.
+  "InfoView.qml": 617,
   "Overlay.qml": 29,
   "WaveWallpaper.qml": 0,
   // Settings drawer (#25): dynamic Style properties qmllint sees as QObject,

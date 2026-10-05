@@ -318,6 +318,11 @@ Scope {
     function setHideQuiet(v: string): void { dashboardSettings.setHideQuietSessions(["1", "true", "on", "yes"].indexOf(String(v).toLowerCase()) >= 0) }
     function toggleHideQuiet(): void { dashboardSettings.toggleHideQuietSessions() }
     function getHideQuiet(): string { return dashboardSettings.hideQuietSessions ? "true" : "false" }
+    // "recent" (newest first) or "terminal" (clickable sessions first, then
+    // the supervisor-run workers nothing can jump to).
+    function setSessionSort(v: string): string { return dashboardSettings.setSessionSort(String(v).toLowerCase()) ? "ok" : "usage: setSessionSort recent|terminal" }
+    function getSessionSort(): string { return dashboardSettings.sessionSort }
+    function toggleSessionSort(): void { dashboardSettings.cycleSessionSort() }
     // 0 restores the desk to every workspace.
     function setDeskWorkspace(v: string): string { return dashboardSettings.setDeskWorkspace(Number(v)) ? "ok" : "usage: setDeskWorkspace 0-" + dashboardSettings.maxWorkspace }
     function getDeskWorkspace(): string { return String(dashboardSettings.deskWorkspace) }
